@@ -11,30 +11,39 @@ and the caches. Run it and it works:
 No PHP, no Composer, no vendor/, no public/ folder. `storage/` next to the binary
 holds sessions, auth.json and caches - KEEP IT between upgrades.
 
+THE TRAY IS IN THE BINARY. There is no tray script and no tray daemon:
+
+    pencarimovie-server --tray        # icon + server in one process
+    pencarimovie-server.exe --tray
+
+Right-click the icon: open the dashboard / add-on page, copy the add-on URL,
+open the log, "Run at login", stop the server. The logo is compiled in, so the
+icon is there even in a folder that holds nothing but the executable.
+
 Everything else in this folder is an OPTIONAL convenience so the server can be
 started without a console and without remembering a command:
 
   Windows
     start.bat          console launcher (you see the log)
-    start-tray.bat     starts hidden + tray icon (double-click = dashboard)
-    tray.ps1           the tray itself (open pages, copy addon URL, restart,
-                       stop, open log, run-at-login)
+    start-tray.bat     starts hidden with the tray icon (double-click = dashboard)
     autostart-on.bat   start at login (HKCU Run, no admin rights)
     autostart-off.bat  remove that entry
-    pencarimovie.ico   the logo used by the tray
+    tray.ps1           compatibility shim only: forwards old login entries that
+                       still point at it to `pencarimovie-server.exe --tray`
+    pencarimovie.ico   logo, for older installs; the binary has its own copy
 
   Linux
     start.sh           console launcher (--open also opens the browser)
-    start-tray.sh      tray icon via `yad` if installed, else background + URL
+    start-tray.sh      `pencarimovie-server --tray` (icon needs `yad`, else URL)
     autostart-on.sh    install ~/.config/autostart/pencarimovie-server.desktop
     autostart-off.sh   remove it
-    pencarimovie.png   the logo used by the icon / autostart entry
+    pencarimovie.png   logo, if you want a desktop shortcut icon
 
   macOS
     start.command      double-click launcher (opens the dashboard)
     autostart-on.sh    LaunchAgent (no window, starts at login)
     autostart-off.sh   remove it
-    pencarimovie.png   logo for the icon
+    pencarimovie.png   logo for a shortcut
 
   (macOS has no shell-level menu-bar API, so there is no tray there without
    shipping a compiled .app bundle. The LaunchAgent covers "always running".)

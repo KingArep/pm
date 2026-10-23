@@ -242,6 +242,125 @@ jobs:
           chmod +x "$OUT/pencarimovie-server"
           ls -lh "$OUT/"
 
+      # ── Tests for each native architecture ──────────────────────────────────
+      # Unit tests verify matcher, descriptor, tunnel, auth and cache logic.
+      # Smoke test boots the native binary on a test port, verifies /api/version
+      # and /manifest.json, and ensures clean shutdown.
+      - name: Unit tests
+        if: matrix.extra_target == ''
+        run: cargo test --release --locked --bin pencarimovie-server
+
+      - name: Unit tests (macOS Intel via Rosetta)
+        if: matrix.extra_target != ''
+        run: cargo test --release --locked --target "${{ matrix.extra_target }}" --bin pencarimovie-server
+
+      - name: Smoke test native binary (${{ matrix.artifact }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="${{ matrix.bin_dir }}/pencarimovie-server"
+          [ -f "$BIN" ] || BIN="$BIN.exe"
+          PORT=18099
+          echo "Smoke testing: $BIN on port $PORT"
+          "$BIN" --port "$PORT" --no-open > server_test.log 2>&1 &
+          PID=$!
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:$PORT/api/version" >/dev/null 2>&1; then
+              echo "Server ready after $i attempt(s)"
+              READY=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "$READY" -ne 1 ]; then
+            echo "::error::Server failed to respond on port $PORT within 15s"
+            cat server_test.log 2>/dev/null || true
+            kill $PID 2>/dev/null || taskkill //F //IM pencarimovie-server.exe 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "--- /api/version"
+          curl -fsS "http://127.0.0.1:$PORT/api/version"
+          echo
+          echo "--- /manifest.json"
+          curl -fsS "http://127.0.0.1:$PORT/manifest.json" | grep -q '"id"'
+          echo "Manifest verified successfully"
+
+          kill $PID 2>/dev/null || taskkill //F //IM pencarimovie-server.exe 2>/dev/null || true
+          wait $PID 2>/dev/null || true
+          echo "Smoke test passed for ${{ matrix.artifact }}"
+
+      - name: Test Tray and Launchers (${{ matrix.artifact }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="${{ matrix.bin_dir }}/pencarimovie-server"
+          [ -f "$BIN" ] || BIN="$BIN.exe"
+          PORT=18092
+
+          # Verify syntax of desktop scripts
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            bash -n desktop/linux/*.sh
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            bash -n desktop/macos/*.sh desktop/macos/*.command
+          fi
+
+          echo "Testing --tray on $RUNNER_OS..."
+          TEST_ROOT="$PWD/test_tray_${{ matrix.artifact }}"
+          rm -rf "$TEST_ROOT"
+          mkdir -p "$TEST_ROOT"
+          PM_APP_ROOT="$TEST_ROOT" "$BIN" --tray --port "$PORT" --no-open > tray_exec.log 2>&1 &
+          TRAY_PID=$!
+
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:$PORT/api/version" >/dev/null 2>&1; then
+              echo "Server with --tray responsive after $i attempt(s)"
+              READY=1
+              break
+            fi
+            sleep 0.5
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "::error::Server with --tray failed to respond on port $PORT within 15s"
+            cat tray_exec.log 2>/dev/null || true
+            kill $TRAY_PID 2>/dev/null || taskkill //F //IM pencarimovie-server.exe 2>/dev/null || true
+            exit 1
+          fi
+
+          case "$RUNNER_OS" in
+            Linux)
+              SCRIPT="$TEST_ROOT/storage/tray/pm-tray.sh"
+              if [ -f "$SCRIPT" ]; then
+                echo "Linux tray script verified: $SCRIPT"
+                test -x "$SCRIPT"
+                echo "Linux tray script is executable (+x)"
+              else
+                echo "::error::Linux embedded tray script was not generated at $SCRIPT"
+                exit 1
+              fi
+              ;;
+            Windows)
+              sleep 2
+              LOG="$TEST_ROOT/storage/server.log"
+              if [ -f "$LOG" ]; then
+                echo "Windows server.log created: $LOG"
+                grep -i "tray" "$LOG" || true
+              fi
+              ./pms.cmd --version
+              ;;
+            macOS)
+              echo "macOS --tray successfully verified"
+              ;;
+          esac
+
+          kill $TRAY_PID 2>/dev/null || taskkill //F //IM pencarimovie-server.exe 2>/dev/null || true
+          wait $TRAY_PID 2>/dev/null || true
+          rm -rf "$TEST_ROOT" server_test.log tray_exec.log 2>/dev/null || true
+          echo "Tray and launcher test passed for ${{ matrix.artifact }}"
+
       - name: Package
         shell: bash
         run: |

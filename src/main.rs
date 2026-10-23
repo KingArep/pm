@@ -2,9 +2,14 @@
 //!
 //! ```text
 //!   pencarimovie-server --port 8088 [--host 127.0.0.1] [--workers N]
-//!                     [--inflight 8] [--max-streams 256]
+//!                     [--inflight 8] [--max-streams 256] [--tray]
 //!   pencarimovie-server --decode <file_id_mt> [expected_id]
 //! ```
+//!
+//! `--tray` puts the icon in the system tray and runs the server behind it, in
+//! this same process (`tray.rs` on Windows, `tray_unix.rs` on Linux). It also
+//! hides its own console, which is what lets the launchers drop
+//! `powershell -WindowStyle Hidden`. `--no-tray` forces it off.
 //!
 //! `--inflight N` (default 8) caps `upload.getFile` parts in flight **per
 //! connection**: each `Client` in a `BotEntry` owns its own semaphore, so
@@ -37,6 +42,18 @@ mod routes;
 mod session;
 mod storage;
 mod telegram;
+// The tray lives in the binary (`--tray`), so a folder holding only the
+// executable still gets an icon: no `tray.ps1`, no PowerShell, no loose script.
+// `tray.rs` is the native Windows icon; `tray_unix.rs` drives `yad` on Linux.
+// Android has no notification area, so it gets neither.
+#[cfg(windows)]
+mod tray;
+#[cfg(all(unix, not(target_os = "android")))]
+mod tray_unix;
+#[cfg(windows)]
+use crate::tray as tray_impl;
+#[cfg(all(unix, not(target_os = "android")))]
+use crate::tray_unix as tray_impl;
 mod tunnel;
 mod update;
 mod upstream;
@@ -92,6 +109,21 @@ async fn serve_all(req: Request) -> Response {
         .expect("AppState must be initialised before serving")
         .clone();
     routes::handle(state, req).await
+}
+
+/// Wakes `shutdown_signal()`. The tray's "Stop server" item is the second way to
+/// ask for a graceful stop (Ctrl-C is the first); a `Notify` carries a permit, so
+/// a click that arrives before the server starts awaiting is not lost.
+static SHUTDOWN: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+
+fn shutdown_trigger() -> &'static tokio::sync::Notify {
+    SHUTDOWN.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Ask the process to stop serving (called from the tray thread).
+#[cfg(windows)]
+pub(crate) fn request_shutdown() {
+    shutdown_trigger().notify_one();
 }
 
 #[tokio::main]
@@ -391,34 +423,71 @@ async fn main() -> anyhow::Result<()> {
     } else {
         host.clone()
     };
-    println!(
-        "\n  PencariMovie Server\n  Local:       http://{}:{}\n  Listening:   {}:{}\n  Storage:     {}\n  Workers:     {} (one Telegram connection each)\n  Inflight:    {} parts per connection ({} total)\n  Max streams: {}\n",
-        shown,
-        port,
-        host,
-        port,
-        storage::storage_dir().display(),
-        workers,
-        inflight,
-        workers * inflight,
-        max_streams
-    );
-    if host == "0.0.0.0" || host == "::" {
-        println!("  LAN/TV:      http://<this-device-ip>:{}\n", port);
+    // Decide the tray ONCE, here, before anything is printed.
+    //
+    // `--tray` forces it; `--no-tray` / `PM_NO_TRAY` forbid it; otherwise a
+    // human-launched console gets one. Linux and Windows share this decision via
+    // `tray_impl`, and Android never does.
+    let console_is_terminal =
+        !cfg!(target_os = "android") && std::io::stdout().is_terminal();
+    #[cfg(not(target_os = "android"))]
+    let tray_requested = tray_impl::wanted(console_is_terminal);
+    #[cfg(target_os = "android")]
+    let tray_requested = false;
+
+    // If a tray icon is going to be created, this console is about to be released
+    // (`FreeConsole`), so a banner here would only flash and vanish. The same
+    // information already goes to storage/server.log (tray "Open log"), and it has
+    // already gone to stderr above in the "listening" line.
+    if !tray_requested {
+        println!(
+            "\n  PencariMovie Server\n  Local:       http://{}:{}\n  Listening:   {}:{}\n  Storage:     {}\n  Workers:     {} (one Telegram connection each)\n  Inflight:    {} parts per connection ({} total)\n  Max streams: {}\n",
+            shown,
+            port,
+            host,
+            port,
+            storage::storage_dir().display(),
+            workers,
+            inflight,
+            workers * inflight,
+            max_streams
+        );
+        if host == "0.0.0.0" || host == "::" {
+            println!("  LAN/TV:      http://<this-device-ip>:{}\n", port);
+        }
     }
 
     // A user who double-clicks the exe expects a browser, not a black window with
     // logs. A terminal was inherited only when a human launched it, so that is the
-    // signal; `--open` forces it, `--no-open` suppresses it (tray, autostart,
-    // service managers, scripts).
+    // signal; `--open` forces it, `--no-open` suppresses it (autostart, service
+    // managers, scripts).
+    //
+    // `--tray` is background mode and implies `--no-open`: no browser, because
+    // start-tray and the login entry are "start it and get out of the way". A
+    // double-click still opens the browser — that is what opening the app means —
+    // it just also drops the console once the icon exists.
     let url = format!("http://{shown}:{port}/");
+    let tray_flag = arg_pos("--tray").is_some();
     let interactive = !cfg!(target_os = "android")
         && !paas_env_present()
+        && !tray_flag
         && arg_pos("--no-open").is_none()
-        && (arg_pos("--open").is_some() || std::io::stdout().is_terminal());
+        && (arg_pos("--open").is_some() || console_is_terminal);
     if interactive {
-        println!("  Close this window (or press Ctrl+C) to stop the server.\n");
+        if !tray_requested {
+            println!("  Close this window (or press Ctrl+C) to stop the server.\n");
+        }
         open_browser(&url);
+    }
+
+    // The icon is this process, not a script beside it: `--tray` (start-tray,
+    // the login entry) or a plain double-click. On Windows it must be the same
+    // process because the shell stores tray settings per HOSTING executable — the
+    // old PowerShell-hosted icon shared `powershell.exe`'s entry and could only
+    // ever sit in the hidden-icons flyout.
+    #[cfg(not(target_os = "android"))]
+    if tray_requested {
+        tray_impl::spawn(port);
     }
 
     let shutdown = shutdown_signal();
@@ -445,7 +514,7 @@ fn rustc_version() -> &'static str {
 /// Open `url` in the user's default browser. Best effort: a box with no browser
 /// (server install, headless CI) must never stop the server from running, so a
 /// failure is only logged.
-fn open_browser(url: &str) {
+pub(crate) fn open_browser(url: &str) {
     let spawned = if cfg!(target_os = "windows") {
         // `start` is a cmd builtin, and its first quoted argument is the window
         // TITLE - passing an empty "" is what makes the second one the URL.
@@ -565,12 +634,18 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = term.recv() => {}
+        _ = shutdown_trigger().notified() => {}
     }
 }
 
 #[cfg(windows)]
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    // Ctrl-C, or the tray's "Stop server" (which goes through the same graceful
+    // path, so the cache still flushes and the icon is removed).
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = shutdown_trigger().notified() => {}
+    }
 }
 
 #[cfg(test)]

@@ -15,6 +15,35 @@ use serde_json::Value;
 use crate::config::{debug_from_env, MAX_LOG_SIZE};
 use crate::storage::{limit_file_size, now, storage_path};
 
+/// `--tray` has no console to print to, so every stderr line is ALSO appended to
+/// `storage/server.log` while it is active. That is what makes "Open log" work in
+/// a background install started by a double-click or the `Run` key, without a
+/// shell redirect (`start ""` opens a fresh console and drops `>>`).
+static MIRROR_STDERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mirror [`stderr_log`] into `storage/server.log` (called once by `--tray`).
+pub fn mirror_stderr_to_server_log() {
+    MIRROR_STDERR.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Is stderr still attached to a real console? Cleared when the tray detaches.
+///
+/// `FreeConsole()` closes the console out from under the process, so the stale
+/// stderr handle starts failing. `eprintln!` PANICS on a failed write, which
+/// would kill the tray thread on its very next log line — hence this guard
+/// instead of "just write and ignore the error".
+static STDERR_LIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Stop writing to stderr (the console is gone; [`server_log_path`] takes over).
+pub fn silence_stderr() {
+    STDERR_LIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The file the tray's "Open log" item opens.
+pub fn server_log_path() -> PathBuf {
+    storage_path("server.log")
+}
+
 pub fn debug_toggle_path() -> PathBuf {
     storage_path("debug_mode.txt")
 }
@@ -59,7 +88,19 @@ pub fn stderr_log(message: &str, ctx: Option<&Value>) {
         Some(v) if v.as_object().map(|o| !o.is_empty()).unwrap_or(false) => format!(" {}", v),
         _ => String::new(),
     };
-    eprintln!("[PencariMovie] {}{}", message, suffix);
+    if STDERR_LIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("[PencariMovie] {}{}", message, suffix);
+    }
+    if MIRROR_STDERR.load(std::sync::atomic::Ordering::Relaxed) {
+        let line = format!("[{}] [PencariMovie] {}{}\n", stamp(now()), message, suffix);
+        let path = server_log_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
 }
 
 pub fn log(message: &str, ctx: &Value) {

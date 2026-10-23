@@ -2,6 +2,51 @@
 
 All notable changes to the PencariMovie Server / Downloader project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **The system tray is now part of the binary, and the icon actually shows.** The
+  tray was a separate `powershell.exe` process running `tray.ps1`. Windows stores
+  the per-app tray settings in `HKCU\Control Panel\NotifyIconSettings` keyed by the
+  **hosting executable**, so that icon shared `powershell.exe`'s single entry with
+  every other PowerShell-hosted tray (it read `9Router` on the machine that
+  reported this) and could only ever sit in the "hidden icons" flyout; running
+  `pencarimovie-server.exe` itself produced no icon at all. Three separate causes,
+  all removed:
+  - `pencarimovie-server --tray` now creates the icon in-process over
+    `Shell_NotifyIconW` (`src/tray.rs`, `user32`/`shell32` only, no new
+    dependency). Verified: the icon appears with the tooltip
+    `PencariMovie Server - port N` **and** the shell writes a
+    `NotifyIconSettings` entry whose `ExecutablePath` is `pencarimovie-server.exe`.
+  - The logo is compiled in (`include_bytes!("../tray.ico")`), so the icon is not
+    the stock/blank one — and not missing at all — in a folder that holds nothing
+    but the executable.
+  - **No console window survives a tray start.** `--tray` (and a double-clicked
+    exe, which also gets an icon) releases its console with `FreeConsole()` rather
+    than hiding it: hiding leaves the process still owning a console, so conhost
+    kept the window and the launching `cmd` alive forever. `start-tray.bat` uses a
+    plain `start`, so the batch returns at once; verified `MainWindowHandle = 0`
+    and no `conhost` child. Because there is no console to redirect,
+    [`log::stderr_log`](src/log.rs:73) also appends to `storage/server.log` while
+    the tray runs, which is the file "Open log" opens.
+  - `tray.ps1` no longer runs the tray; it is a shim that forwards an old
+    `HKCU Run` entry to `pencarimovie-server.exe --tray`. Nothing is registered
+    for login any more, because the exe was never the login entry — the tray menu
+    and `autostart-on.bat` now write the binary's own command line.
+- **`--tray` works on Linux too**: the binary writes its embedded tray script
+  (`desktop/linux/tray.sh`) to `storage/tray/pm-tray.sh` and runs it, so
+  `start-tray.sh`/autostart need only `./pencarimovie-server --tray` (`yad` still
+  draws the icon; without it the server runs and prints the URL). macOS keeps the
+  LaunchAgent: an `NSStatusBar` item needs AppKit, i.e. a `.app` bundle.
+
+### Changed
+
+- `--tray` / `--no-tray` (and `PM_NO_TRAY`) are documented flags; a
+  double-clicked `pencarimovie-server.exe` gets a tray icon as well as the
+  browser. `--tray` hides its own console, so the launchers no longer need
+  `powershell -WindowStyle Hidden`.
+
 ## [2.9.7] - 2026-10-22
 
 ### Fixed

@@ -287,7 +287,7 @@ _(Works across Windows, macOS, Linux, and Termux)._
 - **📡 Home Network LAN Access**: Access streams on connected TV and mobile devices via local Wi-Fi (`http://<LAN-IP>:8088`).
 - **☁️ Optional Secure Tunneling**: Connect remotely using Cloudflare Tunnel integration (`pms tunnel`).
 - **🤖 Bot Pool Rotation**: Configure multiple Bot API credentials to balance high-concurrency personal transfers.
-- **⚡ System Service Integration**: Windows system tray helper and Android background service support.
+- **⚡ System Service Integration**: Built-in system tray (`pencarimovie-server --tray`: native on Windows, `yad` on Linux, no script beside the binary) and Android background service support.
 
 ---
 

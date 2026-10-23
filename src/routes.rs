@@ -3566,7 +3566,7 @@ fn is_private_ipv4(ip: &str) -> bool {
 /// the addon manifest. So the egress address is only accepted when it is private;
 /// otherwise the interfaces are scanned (preferring wifi/ethernet) and, failing
 /// that, loopback is returned so the caller falls back to the request's own host.
-fn lan_ip() -> String {
+pub(crate) fn lan_ip() -> String {
     let egress = (|| -> Option<String> {
         let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
         sock.connect("8.8.8.8:80").ok()?;

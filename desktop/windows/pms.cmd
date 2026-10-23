@@ -35,6 +35,7 @@ if /i "%~1"=="autostart"  goto do_autostart
 if /i "%~1"=="tunnel"     goto do_tunnel
 if /i "%~1"=="start"      goto do_start
 if /i "%~1"=="--start"    goto do_start
+if "%~1"==""              goto do_start
 goto do_run
 
 :do_start
