@@ -2,6 +2,7 @@
 # Remove the LaunchAgent installed by autostart-on.sh and stop the server it
 # started.
 set -eu
+here=$(cd "$(dirname "$0")" && pwd)
 label="com.pencarimovie.server"
 plist="$HOME/Library/LaunchAgents/$label.plist"
 launchctl unload "$plist" >/dev/null 2>&1 || true
