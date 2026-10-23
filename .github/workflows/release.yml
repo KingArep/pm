@@ -341,6 +341,9 @@ jobs:
                 echo "::error::Linux embedded tray script was not generated at $SCRIPT"
                 exit 1
               fi
+              echo "Testing Linux autostart lifecycle..."
+              sh desktop/linux/autostart-on.sh
+              sh desktop/linux/autostart-off.sh
               ;;
             Windows)
               sleep 2
@@ -350,9 +353,15 @@ jobs:
                 grep -i "tray" "$LOG" || true
               fi
               ./pms.cmd --version
+              echo "Testing Windows autostart scripts..."
+              cmd //c "desktop\\windows\\autostart-on.bat"
+              cmd //c "desktop\\windows\\autostart-off.bat"
               ;;
             macOS)
-              echo "macOS --tray successfully verified"
+              echo "Testing macOS LaunchAgent autostart scripts..."
+              sh desktop/macos/autostart-on.sh
+              sh desktop/macos/autostart-off.sh
+              echo "macOS --tray and LaunchAgent scripts successfully verified"
               ;;
           esac
 
