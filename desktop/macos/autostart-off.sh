@@ -7,4 +7,5 @@ plist="$HOME/Library/LaunchAgents/$label.plist"
 launchctl unload "$plist" >/dev/null 2>&1 || true
 rm -f "$plist"
 pkill -f "pencarimovie-server --port" 2>/dev/null || true
+rmdir "$here/storage" 2>/dev/null || true
 echo "Removed $plist (if it existed)."

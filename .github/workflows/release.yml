@@ -361,6 +361,7 @@ jobs:
               echo "Testing macOS LaunchAgent autostart scripts..."
               sh desktop/macos/autostart-on.sh
               sh desktop/macos/autostart-off.sh
+              rm -rf desktop/macos/storage 2>/dev/null || true
               echo "macOS --tray and LaunchAgent scripts successfully verified"
               ;;
           esac
@@ -395,6 +396,7 @@ jobs:
               [ -f tray.png ] && cp tray.png "stage/$NAME/pencarimovie.png" || true
               ;;
             macOS)
+              rm -rf desktop/macos/storage 2>/dev/null || true
               cp desktop/macos/* "stage/$NAME/"
               [ -f tray.png ] && cp tray.png "stage/$NAME/pencarimovie.png" || true
               ;;
