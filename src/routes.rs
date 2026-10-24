@@ -6282,10 +6282,6 @@ async fn manifest(ctx: &ReqCtx) -> Value {
             "adult": false,
             "p2p": false,
         },
-        "stremioAddonsConfig": {
-            "issuer": "https://stremio-addons.net",
-            "signature": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..nml56KvHLqaUJQ_BlL-Qpw.CtzlUaJVrMhQYqYtqI2bri0Rf2l2Uqy72X8Vm77dIqLqAQ0MhU4jKXk54FbI0nMGOoYPJIWxo6HQvV2Iq1FC8bqwXWKLwAd6a9Ey4IT2cD5WRGgbG2In3TCFyt_4LHEM.Hp3mOPOET8lqe0rq-4xVQQ"
-        },
     });
 
     if let Some(cfg) = env("STREMIO_ADDONS_CONFIG")
