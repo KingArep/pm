@@ -433,6 +433,15 @@ class PencariMovieApp {
         if (e.key === "Enter") this.submitAuthPassword();
       });
     }
+    const authDetails = this.$("#authDetails");
+    if (authDetails) {
+      authDetails.addEventListener("toggle", () => {
+        if (authDetails.open) {
+          const inp = this.$("#authPasswordInput");
+          if (inp) inp.focus();
+        }
+      });
+    }
     (_a = this.$("#connectBtn")) == null ? void 0 : _a.addEventListener("click", () => {
       this.saveSettings().catch(err => {
         const el = this.$("#settingsStatus");
@@ -2704,7 +2713,7 @@ class PencariMovieApp {
           return;
         }
       }
-      if (isEnter && active && active.tagName === "BUTTON") {
+      if (isEnter && active && (active.tagName === "BUTTON" || active.tagName === "SUMMARY")) {
         e.preventDefault();
         e.stopPropagation();
         active.click();
@@ -4065,8 +4074,14 @@ class PencariMovieApp {
     gate.setAttribute("aria-hidden", "false");
     (_a = this._hideLoadingScreen) == null ? void 0 : _a.call(this);
     this._syncOverlayFreeze();
-    const input = this.$("#authPasswordInput");
-    if (input) input.focus();
+    const details = this.$("#authDetails");
+    if (details && !details.open) {
+      const summary = this.$("#authSummary");
+      if (summary) summary.focus();
+    } else {
+      const input = this.$("#authPasswordInput");
+      if (input) input.focus();
+    }
   }
   hideAuthGate() {
     const gate = this.$("#authGate");

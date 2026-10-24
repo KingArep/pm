@@ -261,7 +261,10 @@ fn os_version_string() -> String {
             }
             #[cfg(windows)]
             {
-                if let Ok(o) = std::process::Command::new("cmd").args(["/c", "ver"]).output() {
+                use std::os::windows::process::CommandExt;
+                let mut cmd = std::process::Command::new("cmd");
+                cmd.args(["/c", "ver"]).creation_flags(0x0800_0000);
+                if let Ok(o) = cmd.output() {
                     let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
                     if !t.is_empty() {
                         return t;

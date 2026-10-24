@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" href="logo.png?v=20261021b" />
     <link rel="apple-touch-icon" href="logo.png?v=20261021b" />
     <link rel="stylesheet" href="stream-theme.css?v=20261009pm10" />
-    <link rel="stylesheet" href="styles.css?v=20261021fix5" />
+    <link rel="stylesheet" href="styles.css?v=20261024fix1" />
     <link
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
@@ -154,49 +154,61 @@
     <div id="authGate" class="settings-gate hidden" aria-hidden="true">
       <div class="settings-gate__card">
         <h2 class="settings-gate__title">🔒 PencariMovie Server</h2>
-        <p class="settings-gate__desc">
-          Enter server password to continue. (Default: <code>123456</code>)
-        </p>
-        <div class="settings-gate__field">
-          <label class="settings-gate__label" for="authPasswordInput"
-            >Server Password</label
-          >
-          <input
-            type="password"
-            id="authPasswordInput"
-            class="settings-gate__input"
-            placeholder="Password"
-            autocomplete="current-password"
-          />
-        </div>
-        <button id="authConnectBtn" class="settings-gate__btn">Connect</button>
-        <div id="authStatus" class="settings-gate__status"></div>
         <div
           class="settings-gate__notice"
           style="
             margin-top: 16px;
-            padding: 10px 12px;
+            padding: 12px 14px;
             background: rgba(255, 255, 255, 0.04);
             border: 1px solid rgba(255, 255, 255, 0.08);
             border-radius: 8px;
-            font-size: 0.78rem;
-            color: #aaa;
-            line-height: 1.45;
+            font-size: 0.82rem;
+            color: #ccc;
+            line-height: 1.5;
             text-align: left;
           "
         >
           PencariMovie Server is completely free &mdash; we never sell access or
           subscriptions. If this is not your personal server, you can easily run
-          your own for free on your phone, PC, or TV &mdash; get the installer
+          your own for free on any device (Phone, PC, TV, VPS, Cloud) &mdash; get the installer
           at
           <a
             href="https://telegra.my"
             target="_blank"
             rel="noopener"
-            style="color: var(--accent, #ff6b35); text-decoration: underline"
+            style="color: var(--accent, #ff6b35); font-weight: 600; text-decoration: underline"
             >telegra.my</a
           >.
         </div>
+
+        <details id="authDetails" class="settings-gate__details">
+          <summary
+            id="authSummary"
+            class="settings-gate__summary"
+            tabindex="0"
+          >
+            Server owner? Click to enter password
+          </summary>
+          <div style="margin-top: 14px">
+            <p class="settings-gate__desc" style="margin-bottom: 12px; font-size: 0.82rem; color: #888;">
+              Enter server password to continue. (Default: <code>123456</code>)
+            </p>
+            <div class="settings-gate__field">
+              <label class="settings-gate__label" for="authPasswordInput"
+                >Server Password</label
+              >
+              <input
+                type="password"
+                id="authPasswordInput"
+                class="settings-gate__input"
+                placeholder="Password"
+                autocomplete="current-password"
+              />
+            </div>
+            <button id="authConnectBtn" class="settings-gate__btn" style="width: 100%">Connect</button>
+            <div id="authStatus" class="settings-gate__status"></div>
+          </div>
+        </details>
       </div>
     </div>
 
@@ -1814,6 +1826,6 @@
         }
       })();
     </script>
-    <script defer src="app.js?v=20261024apk1"></script>
+    <script defer src="app.js?v=20261024fix1"></script>
   </body>
 </html>

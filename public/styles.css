@@ -202,6 +202,35 @@
   color: #ff8a5c;
 }
 
+.settings-gate__details {
+  margin-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 14px;
+  text-align: left;
+}
+
+.settings-gate__summary {
+  cursor: pointer;
+  font-size: 0.88rem;
+  color: rgba(255, 255, 255, 0.75);
+  user-select: none;
+  padding: 6px 8px;
+  border-radius: 6px;
+  list-style-position: inside;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.settings-gate__summary:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.settings-gate__summary:focus-visible,
+.settings-gate__summary:focus {
+  outline: 2px solid var(--accent, #ff6b35) !important;
+  outline-offset: 2px;
+}
+
 .settings-gate__close {
   position: absolute;
   top: 12px;

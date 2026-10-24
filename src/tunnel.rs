@@ -545,7 +545,10 @@ pub async fn metrics_ports(pid: i64, preferred: u16) -> Vec<u16> {
     if ports.is_empty() {
         ports.push(20241);
     }
-    if pid > 1 {
+    // Only search system sockets if we don't already have a candidate port.
+    // When preferred > 0, cloudflared was explicitly given that port; running
+    // netstat on every 250ms polling loop thrashes process execution for no reason.
+    if pid > 1 && preferred == 0 && ports.len() <= 1 {
         #[cfg(windows)]
         let listing = run_capture("netstat", &["-ano", "-p", "tcp"]).await;
         #[cfg(not(windows))]
@@ -612,10 +615,17 @@ async fn run_capture(program: &str, args: &[&str]) -> String {
         let program = program.to_string();
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         move || {
-            Command::new(program)
-                .args(&args)
-                .stdin(Stdio::null())
-                .output()
+            let mut cmd = Command::new(program);
+            cmd.args(&args)
+                .stdin(Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                // CREATE_NO_WINDOW: helper tools (netstat, tasklist, taskkill)
+                // must NEVER flash a console window.
+                cmd.creation_flags(0x0800_0000);
+            }
+            cmd.output()
                 .map(|o| {
                     let mut s = String::from_utf8_lossy(&o.stdout).to_string();
                     s.push_str(&String::from_utf8_lossy(&o.stderr));
@@ -626,6 +636,36 @@ async fn run_capture(program: &str, args: &[&str]) -> String {
     })
     .await;
     out.unwrap_or_default()
+}
+
+/// Check whether a process is running on Windows using native Win32 APIs without
+/// shelling out to `tasklist.exe` (which spawns an external process).
+#[cfg(windows)]
+pub fn win_pid_alive(pid: i64) -> bool {
+    if pid <= 1 || pid > u32::MAX as i64 {
+        return false;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
+        fn GetExitCodeProcess(hProcess: isize, lpExitCode: *mut u32) -> i32;
+        fn CloseHandle(hObject: isize) -> i32;
+        fn GetLastError() -> u32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    const ERROR_ACCESS_DENIED: u32 = 5;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+        if handle == 0 {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut exit_code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut exit_code);
+        CloseHandle(handle);
+        ok != 0 && exit_code == STILL_ACTIVE
+    }
 }
 
 /// `tasklist /FI "PID eq N" /NH /FO CSV` contains that pid (pure, testable).
@@ -669,12 +709,7 @@ pub async fn pid_alive(pid: i64, metrics_port: u16) -> bool {
     }
     #[cfg(windows)]
     {
-        let listing = run_capture(
-            "tasklist",
-            &["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"],
-        )
-        .await;
-        tasklist_contains_pid(&listing, pid)
+        win_pid_alive(pid)
     }
     #[cfg(not(windows))]
     {
@@ -806,12 +841,16 @@ fn is_usable_bin(path: &Path) -> bool {
 /// `fd_tunnel_which()` — `where cloudflared` / `command -v cloudflared`.
 pub fn which() -> String {
     #[cfg(windows)]
-    let out = Command::new("where")
-        .arg("cloudflared")
-        .stdin(Stdio::null())
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
+    let out = {
+        let mut cmd = Command::new("where");
+        cmd.arg("cloudflared")
+            .stdin(Stdio::null());
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+        cmd.output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    };
     #[cfg(not(windows))]
     let out = Command::new("sh")
         .args(["-c", "command -v cloudflared 2>/dev/null"])
@@ -1191,13 +1230,18 @@ pub async fn ensure_cloudflared() -> (String, String) {
 /// in for one archive.
 fn extract_tgz(tgz: &Path, dest_bin: &Path) -> bool {
     let dir = dest_bin.parent().unwrap_or_else(|| Path::new("."));
-    let status = Command::new("tar")
-        .arg("-xzf")
+    let mut cmd = Command::new("tar");
+    cmd.arg("-xzf")
         .arg(tgz)
         .arg("-C")
         .arg(dir)
-        .stdin(Stdio::null())
-        .status();
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let status = cmd.status();
     if let Ok(s) = status {
         if !s.success() {
             log("cloudflared tgz extract failed", &json!({"status": format!("{:?}", s.code())}));
@@ -1703,11 +1747,13 @@ pub async fn get_tunnel_status(server_port: u16) -> Value {
     }
 
     if alive {
-        let live = read_quicktunnel_url(pid, metrics_port).await;
-        if !live.is_empty() {
-            url = live;
-        } else if url.is_empty() {
-            url = parse_url_from_text(&read_logs());
+        if url.is_empty() {
+            let live = read_quicktunnel_url(pid, metrics_port).await;
+            if !live.is_empty() {
+                url = live;
+            } else {
+                url = parse_url_from_text(&read_logs());
+            }
         }
         if !url.is_empty()
             && (st_str(&state, "tunnel_url") != url
@@ -2564,6 +2610,16 @@ mod tests {
         assert!(!tasklist_contains_pid(csv, 1234));
         assert!(!tasklist_contains_pid("INFO: No tasks are running which match the specified criteria.", 4321));
         assert!(!tasklist_contains_pid(csv, 0));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn win_pid_alive_detects_self_and_invalid_pids() {
+        let my_pid = std::process::id() as i64;
+        assert!(win_pid_alive(my_pid));
+        assert!(!win_pid_alive(0));
+        assert!(!win_pid_alive(-1));
+        assert!(!win_pid_alive(2_000_000_000));
     }
 
     #[test]
