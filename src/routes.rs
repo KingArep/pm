@@ -6253,7 +6253,7 @@ async fn manifest(ctx: &ReqCtx) -> Value {
     // every build serves its own logo and never depends on that host.
     let logo_url = format!("{}/logo.png", base_url);
 
-    let doc = serde_json::json!({
+    let mut doc = serde_json::json!({
         "id": format!("org.pencarimovie.addon.{}", mode),
         // The APP version (`1.0.52` on Android), not "1.0.0" and not the engine's
         // `git describe`: Stremio/Nuvio parse and DISPLAY this, so a fixed value
@@ -6282,7 +6282,31 @@ async fn manifest(ctx: &ReqCtx) -> Value {
             "adult": false,
             "p2p": false,
         },
+        "stremioAddonsConfig": {
+            "issuer": "https://stremio-addons.net",
+            "signature": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..nml56KvHLqaUJQ_BlL-Qpw.CtzlUaJVrMhQYqYtqI2bri0Rf2l2Uqy72X8Vm77dIqLqAQ0MhU4jKXk54FbI0nMGOoYPJIWxo6HQvV2Iq1FC8bqwXWKLwAd6a9Ey4IT2cD5WRGgbG2In3TCFyt_4LHEM.Hp3mOPOET8lqe0rq-4xVQQ"
+        },
     });
+
+    if let Some(cfg) = env("STREMIO_ADDONS_CONFIG")
+        .or_else(|| env("PM_STREMIO_ADDONS_CONFIG"))
+        .and_then(|raw| {
+            let t = raw.trim();
+            if t.is_empty() || t == "false" || t == "0" || t == "null" {
+                Some(Value::Null)
+            } else {
+                serde_json::from_str::<Value>(t).ok()
+            }
+        })
+        .or_else(|| settings.get("stremioAddonsConfig").cloned())
+    {
+        if cfg.is_null() {
+            doc.as_object_mut().map(|m| m.remove("stremioAddonsConfig"));
+        } else {
+            doc["stremioAddonsConfig"] = cfg;
+        }
+    }
+
     upstream::fit_descriptor(doc, local_count)
 }
 
