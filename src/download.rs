@@ -233,14 +233,118 @@ pub fn extract_payload_from_path(path: &str) -> String {
         .rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase())
         .unwrap_or_default();
-    const MEDIA: [&str; 19] = [
-        "mp4", "m4v", "mkv", "webm", "avi", "mov", "ts", "m2ts", "flv", "wmv", "3gp", "mpg", "mpeg",
-        "mp3", "m4a", "flac", "wav", "ogg", "opus",
-    ];
-    if MEDIA.contains(&ext.as_str()) {
+    if is_media_extension(&ext) {
         return String::new();
     }
     decoded
+}
+
+/// Known media extensions.
+pub const MEDIA_EXTS: [&str; 19] = [
+    "mp4", "m4v", "mkv", "webm", "avi", "mov", "ts", "m2ts", "flv", "wmv", "3gp", "mpg", "mpeg",
+    "mp3", "m4a", "flac", "wav", "ogg", "opus",
+];
+
+/// Known non-media extensions (software, installers, archives, documents).
+/// Downloads matching these extensions are legitimate non-media files and MUST NEVER
+/// be flagged as disguised binaries.
+pub const NON_MEDIA_EXTS: [&str; 27] = [
+    "exe", "msi", "bat", "cmd", "bin", "apk", "xapk", "apks", "zip", "rar", "7z", "tar",
+    "gz", "bz2", "xz", "iso", "dmg", "pkg", "deb", "rpm", "pdf", "epub", "txt", "doc", "docx",
+    "srt", "vtt",
+];
+
+pub fn is_media_extension(ext: &str) -> bool {
+    let lower = ext.to_ascii_lowercase();
+    MEDIA_EXTS.contains(&lower.as_str())
+}
+
+/// Check if a download target claims to be video or audio media.
+pub fn is_media_target(file_name: &str, mime: &str) -> bool {
+    let ext = file_name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if NON_MEDIA_EXTS.contains(&ext.as_str()) {
+        return false;
+    }
+
+    is_media_extension(&ext)
+        || mime.starts_with("video/")
+        || mime.starts_with("audio/")
+        || mime == "application/x-matroska"
+}
+
+/// Detect if a file claiming to be video/audio is actually an executable binary (Windows PE, Linux ELF, Mach-O).
+/// Returns true ONLY when the file claims to be media AND the header bytes prove it is an executable binary.
+pub fn is_disguised_executable(buf: &[u8], file_name: &str, mime: &str) -> bool {
+    if buf.len() < 4 {
+        return false;
+    }
+
+    if !is_media_target(file_name, mime) {
+        return false;
+    }
+
+    // 1. Windows PE / DOS binary: starts with 'M','Z'
+    if buf[0] == b'M' && buf[1] == b'Z' {
+        if buf.len() >= 0x40 {
+            let pe_offset = u32::from_le_bytes([buf[0x3C], buf[0x3D], buf[0x3E], buf[0x3F]]) as usize;
+            if pe_offset + 4 <= buf.len() && &buf[pe_offset..pe_offset + 4] == b"PE\0\0" {
+                return true;
+            }
+        }
+        let haystack = &buf[..buf.len().min(512)];
+        if haystack.windows(12).any(|w| w == b"This program") {
+            return true;
+        }
+        // Claimed video file starting with MZ header is a disguised binary
+        return true;
+    }
+
+    // 2. Linux ELF binary: \x7fELF
+    if buf.len() >= 4 && &buf[0..4] == b"\x7fELF" {
+        return true;
+    }
+
+    // 3. macOS Mach-O binary
+    if buf.len() >= 4 {
+        let magic = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        if matches!(magic, 0xFEEDFACE | 0xFEEDFACF | 0xCEFAEDFE | 0xCFFAEDFE | 0xCAFEBABE) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Asynchronously report a flagged/malicious file to WordPress REST API for soft-deletion from the index.
+pub fn report_and_delete_flagged_file(short_code: &str, file_name: &str, reason: &str, bot_id: &str) {
+    if short_code.trim().is_empty() {
+        return;
+    }
+    let sc = short_code.trim().to_string();
+    let fn_ = file_name.to_string();
+    let r = reason.to_string();
+    let b = bot_id.to_string();
+    tokio::spawn(async move {
+        let url = format!("{}/delete-file", crate::config::wp_api_base());
+        let params = vec![
+            ("short_code".to_string(), sc.clone()),
+            ("file_name".to_string(), fn_),
+            ("reason".to_string(), r),
+            ("bot_id".to_string(), b),
+        ];
+        let res = crate::httpc::http_json(&url, &params, "POST", 10).await;
+        log(
+            "flagged file deletion reported to origin",
+            &serde_json::json!({
+                "short_code": sc,
+                "response": res,
+            }),
+        );
+    });
 }
 
 pub fn is_public_download_path(path: &str) -> bool {
@@ -591,6 +695,27 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
         let a = jstr(&payload, "bot_id");
         if a.is_empty() { ctx.first_param(&["bot_id"]) } else { a }
     };
+
+    if !short_code.is_empty() && crate::cache::get("flagged_malware", &short_code).is_some() {
+        record_refusal(
+            ctx,
+            started,
+            415,
+            "MALICIOUS_PAYLOAD_DETECTED",
+            "The file is an executable binary disguised as media.",
+            &short_code,
+            serde_json::json!({"file_name": file_name, "bot_id": bot_id}),
+        );
+        return json_response(
+            415,
+            &serde_json::json!({
+                "ok": 0,
+                "error": "MALICIOUS_PAYLOAD_DETECTED",
+                "message": "The file is an executable binary disguised as media and has been removed.",
+                "short_code": short_code,
+            }),
+        );
+    }
 
     // Prefer the id an earlier request PROVED works, and take it EXACTLY as cached.
     //
@@ -1358,6 +1483,38 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
         );
     };
 
+    if start == 0 && is_disguised_executable(&first_buf, &file_name, &file_mime) {
+        log(
+            "malicious payload detected: executable binary disguised as media",
+            &serde_json::json!({
+                "short_code": short_code,
+                "file_name": file_name,
+                "bot_id": bot_id,
+            }),
+        );
+        crate::cache::put("flagged_malware", &short_code, &serde_json::json!(1), 86400, 0);
+        invalidate_resolve_cache(&short_code, &bot_id);
+        report_and_delete_flagged_file(&short_code, &file_name, "disguised_executable", &bot_id);
+        record_refusal(
+            ctx,
+            started,
+            415,
+            "MALICIOUS_PAYLOAD_DETECTED",
+            "The file is an executable binary disguised as media.",
+            &short_code,
+            serde_json::json!({"bot_id": bot_id, "file_name": file_name}),
+        );
+        return json_response(
+            415,
+            &serde_json::json!({
+                "ok": 0,
+                "error": "MALICIOUS_PAYLOAD_DETECTED",
+                "message": "The file is an executable binary disguised as media and has been removed.",
+                "short_code": short_code,
+            }),
+        );
+    }
+
     /* ── commit headers, then stream ────────────────────────────────────── */
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
     let target_for_task = target.clone();
@@ -1954,5 +2111,50 @@ mod tests {
         // Other pool bots are not added to candidates to prevent 410 FILE_REFERENCE_EXPIRED
         assert!(!cands.contains(&"bot_1".to_string()));
         assert!(!cands.contains(&"bot_3".to_string()));
+    }
+
+    #[test]
+    fn disguised_executable_detection() {
+        // 1. Valid MP4 (ftyp at offset 4) must NOT be flagged
+        let valid_mp4 = [0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm'];
+        assert!(!is_disguised_executable(&valid_mp4, "movie.mp4", "video/mp4"));
+
+        // 2. Valid MKV (EBML ID \x1A\x45\xDF\xA3) must NOT be flagged
+        let valid_mkv = [0x1A, 0x45, 0xDF, 0xA3, 0x93, 0x42, 0x86];
+        assert!(!is_disguised_executable(&valid_mkv, "movie.mkv", "video/x-matroska"));
+
+        // 3. Legitimate EXE file with MZ header must NOT be flagged (no false positive for apps)
+        let mut pe_exe = vec![0u8; 512];
+        pe_exe[0] = b'M';
+        pe_exe[1] = b'Z';
+        pe_exe[0x3C] = 0x80;
+        pe_exe[0x80] = b'P';
+        pe_exe[0x81] = b'E';
+        pe_exe[0x82] = 0;
+        pe_exe[0x83] = 0;
+        assert!(!is_disguised_executable(&pe_exe, "setup.exe", "application/octet-stream"));
+        assert!(!is_disguised_executable(&pe_exe, "app.apk", "application/vnd.android.package-archive"));
+        assert!(!is_disguised_executable(&pe_exe, "archive.zip", "application/zip"));
+
+        // 4. Disguised Windows PE executable claiming to be .mp4 MUST be flagged
+        assert!(is_disguised_executable(&pe_exe, "Resident.Evil.2026.mp4", "video/mp4"));
+        assert!(is_disguised_executable(&pe_exe, "movie.mkv", ""));
+
+        // 5. DOS executable with "This program cannot be run in DOS mode" claiming to be .avi MUST be flagged
+        let mut dos_exe = vec![0u8; 128];
+        dos_exe[0] = b'M';
+        dos_exe[1] = b'Z';
+        dos_exe[0x20..0x20 + 12].copy_from_slice(b"This program");
+        assert!(is_disguised_executable(&dos_exe, "video.avi", "video/x-msvideo"));
+
+        // 6. Linux ELF binary claiming to be .mp4 MUST be flagged
+        let elf = [0x7F, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00];
+        assert!(is_disguised_executable(&elf, "movie.mp4", "video/mp4"));
+        // But legitimate ELF without media extension must NOT be flagged
+        assert!(!is_disguised_executable(&elf, "my_binary.bin", "application/octet-stream"));
+
+        // 7. Short buffers must NOT panic and return false
+        assert!(!is_disguised_executable(&[b'M', b'Z'], "movie.mp4", "video/mp4"));
+        assert!(!is_disguised_executable(&[], "movie.mp4", "video/mp4"));
     }
 }
