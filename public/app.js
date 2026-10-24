@@ -5687,11 +5687,8 @@ class PencariMovieApp {
           });
           return null;
         }
-        if (appShell) {
-          // The desktop release feed is not this build's feed.
-          return null;
-        }
-        // Desktop builds also read their own release feed (silent, best effort).
+        // Both desktop builds and Android app shells read their update feed
+        // (/api/update/check resolves desktop releases or apk-server-latest).
         void this.checkDesktopUpdate();
         return null;
       } catch (e) {
@@ -5805,9 +5802,10 @@ class PencariMovieApp {
       // this CPU, no apply script) gets a link to the release page instead of a
       // button that can only fail. The server decides via `can_apply`.
       const canApply = info.canApply !== false;
+      const isApk = !!(info.hint && info.hint.includes("APK"));
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.textContent = canApply ? "Update now" : "Release page";
+      btn.textContent = canApply ? "Update now" : (isApk ? "Download APK" : "Release page");
       btn.setAttribute("style", "background:#ff6b35;color:#141414;border:0;border-radius:6px;padding:6px 12px;font-weight:600;cursor:pointer");
       btn.addEventListener("click", () => {
         if (canApply) {

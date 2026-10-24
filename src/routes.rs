@@ -3075,14 +3075,14 @@ async fn finish_streams(
     if streams.is_empty() {
         streams.push(no_streams_card(ctx, title, item_id, filtered, files_before_filter));
     }
-    if let Some(sponsor) = sponsor_item().await {
-        streams.insert(0, sponsor);
-    }
     // The WordPress minimum-version notice as a NON-BLOCKING item: the PHP
     // returned this card INSTEAD of the streams, which made an outdated engine
-    // unusable. Here it is one extra line on top and every stream keeps working.
+    // unusable. Placed below the sponsor item (if any), above media streams.
     if let Some(card) = update_notice(had_streams, &ctx.base_url).await {
         streams.insert(0, card);
+    }
+    if let Some(sponsor) = sponsor_item().await {
+        streams.insert(0, sponsor);
     }
     let body = serde_json::json!({"streams": streams});
     crate::cache::put(
@@ -3095,39 +3095,85 @@ async fn finish_streams(
     stremio_json(200, &body, "no-store")
 }
 
-/// Build the "update available" item from a `/api/version` answer.
+/// Build the "update available" item from a `/api/update/check` answer
+/// (same check mechanism as the web #addon / #settings banner).
 ///
 /// Non-blocking by design: it never replaces the streams. `container` changes the
 /// advice, because a container updates by pulling a new image, not by replacing a
-/// binary. An app shell never reaches here (`update_needed` is false for it).
+/// binary. An app shell never reaches here (`update_available` is false for it).
 fn build_update_notice(
     check: &Value,
     container: bool,
     streams_below: bool,
     base_url: &str,
 ) -> Value {
-    let current = crate::config::clean_version(&jstr(check, "current_version"));
-    let minimum = crate::config::clean_version(&jstr(check, "minimum_version"));
-    let wp_url = jstr(check, "update_url").trim().to_string();
-    // Where "the update page" actually is, in order of usefulness:
-    //   1. the anchor WordPress publishes (`update_url`), when it is configured;
-    //   2. on a desktop build with no published URL, THIS server's `#settings`,
-    //      which carries the update banner and its one-click "Update now";
-    //   3. otherwise (container / bare build) the public release page, next to
-    //      the pull command the description already prints.
+    let current_raw = check
+        .get("current_display")
+        .or_else(|| check.get("current"))
+        .or_else(|| check.get("current_version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let current = crate::config::clean_version(current_raw);
+
+    let latest_raw = check
+        .get("latest_display")
+        .or_else(|| check.get("latest"))
+        .or_else(|| check.get("minimum_version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let latest = crate::config::clean_version(latest_raw);
+
+    let explicit_url = check
+        .get("update_url")
+        .or_else(|| check.get("notes_url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+
+    // Where "the update page" actually is:
+    //   1. In a container, the public releases page next to the pull hint;
+    //   2. On Android (app_managed), the APK release / direct download link;
+    //   3. An explicit custom update url (if non-GitHub);
+    //   4. On a desktop build, THIS server's `#settings`, which carries the update banner
+    //      and one-click "Update now".
     let (url, hint) = if container {
+        let releases = check
+            .get("releases_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         (
-            crate::update::releases_url(),
+            if !releases.is_empty() {
+                releases.to_string()
+            } else {
+                crate::update::releases_url()
+            },
             "run `docker compose pull && docker compose up -d`",
         )
-    } else if !wp_url.is_empty() {
-        (wp_url, "open the update page, then restart the server")
+    } else if check.get("app_managed").and_then(|v| v.as_bool()) == Some(true) {
+        let target = check
+            .get("releases_url")
+            .or_else(|| check.get("notes_url"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        (
+            if !target.is_empty() {
+                target.to_string()
+            } else {
+                crate::update::apk_releases_url()
+            },
+            "open the update page to install the new APK",
+        )
+    } else if !explicit_url.is_empty() && !explicit_url.contains("github.com") {
+        (explicit_url.to_string(), "open the update page, then restart the server")
     } else {
         (
             format!("{}/#settings", base_url.trim_end_matches('/')),
             "open Settings on this server and press Update now",
         )
     };
+
     // Only promise the streams below when there ARE streams below — an empty
     // list still gets the notice (its own card explains the empty result).
     let tail = if streams_below {
@@ -3138,21 +3184,28 @@ fn build_update_notice(
     serde_json::json!({
         "name": "⬆️ Update available",
         "description": format!(
-            "PencariMovie v{minimum} is available (this install: v{current}).\n👉 To update {hint}{tail}",
+            "PencariMovie v{latest} is available (this install: v{current}).\n👉 To update {hint}{tail}",
         ),
         "externalUrl": url,
     })
 }
 
-/// `None` unless the WordPress minimum version is genuinely newer than this build.
+/// `None` unless a newer release is published (same update feed as `#settings` / `#addon`).
 async fn update_notice(streams_below: bool, base_url: &str) -> Option<Value> {
-    let check = check_version().await;
-    if check.get("update_needed").and_then(|v| v.as_bool()) != Some(true) {
+    let check = crate::update::check().await;
+    let available = check
+        .get("update_available")
+        .and_then(|v| v.as_bool())
+        .or_else(|| check.get("update_needed").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    if !available {
         return None;
     }
+    let container = check.get("apply_blocked_reason").and_then(|v| v.as_str()) == Some("container")
+        || crate::update::runs_in_container();
     Some(build_update_notice(
         &check,
-        crate::update::runs_in_container(),
+        container,
         streams_below,
         base_url,
     ))
@@ -7227,6 +7280,47 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("press Update now"));
+
+        // Also accepts the /api/update/check feed payload format (like web #settings / #addon)
+        let check_feed = serde_json::json!({
+            "ok": true,
+            "update_available": true,
+            "current_display": "2.8.8",
+            "latest_display": "2.9.0",
+            "releases_url": "https://github.com/aiskendi/pencarimovie-server/releases/latest"
+        });
+        let desktop_feed = build_update_notice(&check_feed, false, true, "http://127.0.0.1:8088");
+        let desc_feed = desktop_feed["description"].as_str().unwrap();
+        assert!(desc_feed.contains("v2.9.0"), "{desc_feed}");
+        assert!(desc_feed.contains("v2.8.8"), "{desc_feed}");
+
+        // Android app_managed feed payload
+        let android_feed = serde_json::json!({
+            "ok": true,
+            "app_managed": true,
+            "update_available": true,
+            "current_display": "1.0.71",
+            "latest_display": "1.0.72",
+            "releases_url": "https://github.com/aiskendi/pencarimovie-server/releases/download/apk-server-latest/pencarimovie-server_arm64-v8a.apk"
+        });
+        let android_card = build_update_notice(&android_feed, false, true, "http://127.0.0.1:8088");
+        let and_desc = android_card["description"].as_str().unwrap();
+        assert!(and_desc.contains("v1.0.72"), "{and_desc}");
+        assert!(and_desc.contains("v1.0.71"), "{and_desc}");
+        assert_eq!(
+            android_card["externalUrl"],
+            serde_json::json!("https://github.com/aiskendi/pencarimovie-server/releases/download/apk-server-latest/pencarimovie-server_arm64-v8a.apk")
+        );
+
+        // Placement order: inserting update notice then sponsor results in sponsor at [0] and update at [1]
+        let mut streams = vec![serde_json::json!({"name": "Movie.1080p.mkv"})];
+        let card = desktop_feed;
+        let sponsor = serde_json::json!({"name": "⭐️ Sponsored message"});
+        streams.insert(0, card);
+        streams.insert(0, sponsor);
+        assert_eq!(streams[0]["name"], "⭐️ Sponsored message");
+        assert_eq!(streams[1]["name"], "⬆️ Update available");
+        assert_eq!(streams[2]["name"], "Movie.1080p.mkv");
     }
 
     #[test]

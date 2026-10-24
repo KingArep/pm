@@ -18,6 +18,10 @@ use crate::config;
 
 const REPO: &str = "aiskendi/pencarimovie-server";
 const API_LATEST: &str = "https://api.github.com/repos/aiskendi/pencarimovie-server/releases/latest";
+const APK_VERSION_JSON: &str =
+    "https://github.com/aiskendi/pencarimovie-server/releases/download/apk-server-latest/version.json";
+const APK_RELEASES_URL: &str =
+    "https://github.com/aiskendi/pencarimovie-server/releases/tag/apk-server-latest";
 
 /// `linux-x86_64`, `windows-x86_64`, `macos-aarch64` — the artifact suffix the
 /// release workflow publishes. `None` on a platform we do not build for.
@@ -25,6 +29,10 @@ const API_LATEST: &str = "https://api.github.com/repos/aiskendi/pencarimovie-ser
 /// (the streams-list notice, a container, a bare build).
 pub fn releases_url() -> String {
     format!("https://github.com/{REPO}/releases/latest")
+}
+
+pub fn apk_releases_url() -> String {
+    APK_RELEASES_URL.to_string()
 }
 
 pub fn platform_key() -> Option<&'static str> {
@@ -85,6 +93,71 @@ async fn latest_release() -> Value {
         Ok(Ok(res)) if res.status().is_success() => res.json::<Value>().await.unwrap_or(Value::Null),
         _ => Value::Null,
     }
+}
+
+async fn latest_apk_release() -> Value {
+    let client = crate::httpc::client();
+    let req = client
+        .get(APK_VERSION_JSON)
+        .header("User-Agent", config::user_agent())
+        .header("Accept", "application/json");
+    match tokio::time::timeout(std::time::Duration::from_secs(10), req.send()).await {
+        Ok(Ok(res)) if res.status().is_success() => res.json::<Value>().await.unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+fn build_apk_check_answer(client: &str, current: &str, release: &Value) -> Value {
+    let effective_current = if !client.trim().is_empty() {
+        client.trim().to_string()
+    } else {
+        current.to_string()
+    };
+    if release.is_null() {
+        return serde_json::json!({
+            "ok": false,
+            "app_managed": true,
+            "current": effective_current,
+            "client": client,
+            "build": config::build_id(),
+            "error": "Could not reach the Android APK release feed.",
+        });
+    }
+    let latest = release
+        .get("versionName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let apk_url = release
+        .get("apkUrl")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let download_url = if !apk_url.is_empty() {
+        apk_url
+    } else {
+        APK_RELEASES_URL.to_string()
+    };
+    let update_available = !latest.is_empty() && is_newer(&latest, &effective_current);
+    serde_json::json!({
+        "ok": true,
+        "app_managed": true,
+        "current": effective_current.clone(),
+        "client": client,
+        "build": config::build_id(),
+        "current_display": config::clean_version(&effective_current),
+        "latest_display": config::clean_version(&latest),
+        "latest": latest,
+        "update_available": update_available,
+        "asset": Value::Null,
+        "can_apply": false,
+        "apply_blocked_reason": "app_managed",
+        "apply_hint": "Updates are installed via the PencariMovie Server APK",
+        "notes_url": APK_RELEASES_URL,
+        "releases_url": download_url,
+    })
 }
 
 /// True when this binary lives INSIDE an app shell that ships its own updater.
@@ -148,22 +221,35 @@ const CONTAINER_HINT: &str =
 pub async fn check() -> Value {
     let current = config::app_version();
     let client = config::client_version();
-    if app_managed_for(&client) {
-        return serde_json::json!({
-            "ok": false,
-            "app_managed": true,
-            "current": current,
-            "client": client,
-            "build": config::build_id(),
-            "error": "Updates are handled by the PencariMovie Server app that runs this engine.",
-        });
+    let is_android = app_managed_for(&client);
+    let cache_key = if is_android {
+        "check_android"
+    } else {
+        "check_desktop"
+    };
+
+    if let Some(hit) = crate::cache::get("update", cache_key) {
+        return (*hit).clone();
     }
+
+    if is_android {
+        let release = latest_apk_release().await;
+        let res = build_apk_check_answer(&client, &current, &release);
+        let ttl = if res.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+            3600
+        } else {
+            300
+        };
+        crate::cache::put("update", cache_key, &res, ttl, 0);
+        return res;
+    }
+
     let release = latest_release().await;
     if release.is_null() {
         // In a container the actionable answer does not depend on the feed: the
         // image is the unit of update, so say that instead of "check your network".
-        if runs_in_container() {
-            return serde_json::json!({
+        let res = if runs_in_container() {
+            serde_json::json!({
                 "ok": false,
                 "container": true,
                 "current": current,
@@ -172,14 +258,17 @@ pub async fn check() -> Value {
                 "apply_hint": CONTAINER_HINT,
                 "releases_url": releases_url(),
                 "error": CONTAINER_HINT,
-            });
-        }
-        return serde_json::json!({
-            "ok": false,
-            "current": current,
-            "build": config::build_id(),
-            "error": "Could not reach the release feed. Check this machine's network, then retry.",
-        });
+            })
+        } else {
+            serde_json::json!({
+                "ok": false,
+                "current": current,
+                "build": config::build_id(),
+                "error": "Could not reach the release feed. Check this machine's network, then retry.",
+            })
+        };
+        crate::cache::put("update", cache_key, &res, 300, 0);
+        return res;
     }
     let latest = release
         .get("tag_name")
@@ -187,20 +276,22 @@ pub async fn check() -> Value {
         .unwrap_or("")
         .to_string();
     let Some(key) = platform_key() else {
-        return serde_json::json!({
+        let res = serde_json::json!({
             "ok": false,
             "current": current,
             "build": config::build_id(),
             "latest": latest,
             "error": "No update artifact is published for this platform.",
         });
+        crate::cache::put("update", cache_key, &res, 3600, 0);
+        return res;
     };
     let asset = asset_of(&release, &format!("pencarimovie-server-{key}.tar.gz"));
     // `can_apply` is what the update bar acts on: a container, a release with no
     // artifact for THIS arch, and a bare build with no apply script can all SEE
     // the update but must not offer a button that cannot work.
     let reason = apply_blocked_reason(asset.as_deref());
-    serde_json::json!({
+    let res = serde_json::json!({
         "ok": true,
         "current": current,
         "build": config::build_id(),
@@ -217,7 +308,9 @@ pub async fn check() -> Value {
         "apply_hint": if reason == "container" { CONTAINER_HINT } else { "" },
         "notes_url": release.get("html_url").and_then(|v| v.as_str()).unwrap_or(""),
         "releases_url": releases_url(),
-    })
+    });
+    crate::cache::put("update", cache_key, &res, 3600, 0);
+    res
 }
 
 fn updates_dir() -> std::path::PathBuf {
@@ -380,6 +473,26 @@ mod tests {
         assert!(app_managed_for("1.0.55"));
         assert!(app_managed_for(" 1.0.55 "));
         assert_eq!(app_managed_for(""), cfg!(target_os = "android"));
+
+        // When a newer APK is available in version.json, it reports update_available
+        // and points to the APK feed without offering desktop artifacts.
+        let newer = serde_json::json!({
+            "versionName": "1.0.72",
+            "versionCode": 10072,
+            "apkUrl": "https://example.test/pencarimovie-server.apk"
+        });
+        let ans = build_apk_check_answer("1.0.71", "", &newer);
+        assert_eq!(ans["ok"], true);
+        assert_eq!(ans["app_managed"], true);
+        assert_eq!(ans["update_available"], true);
+        assert_eq!(ans["current_display"], "1.0.71");
+        assert_eq!(ans["latest_display"], "1.0.72");
+        assert_eq!(ans["can_apply"], false);
+        assert_eq!(ans["releases_url"], "https://example.test/pencarimovie-server.apk");
+
+        // Same version means no update needed.
+        let same = build_apk_check_answer("1.0.72", "", &newer);
+        assert_eq!(same["update_available"], false);
     }
 
     #[test]
