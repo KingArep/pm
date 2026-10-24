@@ -2962,18 +2962,21 @@ async fn build_streams_from_files(
 
     let mut scored: Vec<(f64, Value)> = kept
         .iter()
-        .map(|(idx, _res_key)| {
+        .filter_map(|(idx, _res_key)| {
             let f = &matched[*idx];
+            if !f.short_code.is_empty() && crate::cache::get("flagged_malware", &f.short_code).is_some() {
+                return None;
+            }
             let score = crate::matcher::stream_sort_score(
                 &f.title,
                 &f.caption,
                 f.file_size,
                 "auto",
             );
-            (
+            Some((
                 score,
                 stream_item(ctx, &f.short_code, &f.title, &f.caption, f.file_size, &f.mime),
-            )
+            ))
         })
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
