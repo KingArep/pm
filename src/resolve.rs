@@ -28,7 +28,13 @@ use crate::storage::now;
 
 /// Freshness window for a resolved `file_id_mt` (the embedded `file_reference`
 /// dies on Telegram's side; the download path re-resolves on expiry).
-const RESOLVE_TTL: i64 = 7200;
+///
+/// 2 h was wrong. Measured on 2026-10-24: every Eclipse track logged
+/// `FILE_REFERENCE_EXPIRED (400)` on its FIRST byte, then a 7-20 s re-resolve the
+/// browser never waited for, so playback died while the origin resolved the same
+/// code instantly. A reference lives ~1 h, so the cache has to expire sooner than
+/// it does: 50 min keeps a hit usable and still saves the resolve on the next tap.
+const RESOLVE_TTL: i64 = 3000;
 /// The "one refresh per burst" memo the player's parallel Range requests share.
 const FRESH_MEMO_TTL: i64 = 10;
 /// How long a FAILED prewarm resolve suppresses a retry for that code.
@@ -59,19 +65,67 @@ fn has_id(v: &Value) -> bool {
 pub fn resolve_shortcode_cached(short_code: &str, bot_id: &str) -> Option<Value> {
     let key = cache_key(short_code, bot_id);
     let hit = cache::get("resolve", &key)?;
-    if has_id(&hit) {
+    // Two origin answers carry an id but NOT the catalog metadata:
+    //   • `/resolve-files` (batch) — `ok/short_code/file_id_mt/bot_id` only;
+    //   • `/resolve-file`'s stale-refresh branch — `refreshed:1` + the id, no
+    //     `title`.
+    // Cached as a "resolve" they are ids with nothing attached, and every
+    // metadata consumer breaks: `/eclipse/stream/<code>` answered
+    // `{"error":"Track not found"}` in **4.6 ms** for a code the origin resolves
+    // perfectly. A real resolve always knows the size AND the file name, so
+    // anything less is a MISS and gets resolved again.
+    if has_id(&hit) && file_size_of(&hit) > 0 && !jstr(&hit, "title").is_empty() {
         Some((*hit).clone())
     } else {
         None
     }
 }
 
+fn jstr(v: &Value, key: &str) -> String {
+    v.get(key).and_then(|x| x.as_str()).unwrap_or("").trim().to_string()
+}
+
+fn file_size_of(v: &Value) -> u64 {
+    v.get("file_size")
+        .and_then(|x| match x {
+            Value::Number(n) => n.as_u64().or_else(|| n.as_i64().map(|i| i.max(0) as u64)),
+            Value::String(s) => s.trim().parse::<u64>().ok(),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
 pub fn save_resolve_cache(short_code: &str, bot_id: &str, data: &Value) {
     if !has_id(data) {
         return;
     }
+    // The single choke point for every writer, so a metadata-less id can never
+    // be persisted as a resolve (see `resolve_shortcode_cached`). The id is
+    // still returned to the caller and the origin keeps it in `tg_file_id`, so
+    // the next single resolve is instant.
+    if file_size_of(data) == 0 || jstr(data, "title").is_empty() {
+        log(
+            "not caching an id-only answer as a resolve",
+            &serde_json::json!({
+                "short_code": short_code,
+                "bot_id": bot_id,
+                "has_size": file_size_of(data) > 0,
+                "has_title": !jstr(data, "title").is_empty(),
+            }),
+        );
+        return;
+    }
+    // Stamp WHEN the id was minted. A Telegram `file_reference` lives ~1 h, and
+    // the download path refuses an id that was never PROVEN by a real fetch once
+    // it is older than that — otherwise every Play starts with a guaranteed
+    // `FILE_REFERENCE_EXPIRED` plus a re-resolve the browser player does not
+    // wait for (its `<audio>` element errors after ~20 s).
+    let mut stamped = data.clone();
+    if let Some(obj) = stamped.as_object_mut() {
+        obj.insert("resolved_at".to_string(), serde_json::json!(now()));
+    }
     let key = cache_key(short_code, bot_id);
-    cache::put("resolve", &key, data, RESOLVE_TTL, 0);
+    cache::put("resolve", &key, &stamped, RESOLVE_TTL, 0);
     // A success always clears the negative marker, so a code that resolves later is
     // immediately eligible again.
     cache::invalidate("resolve_miss", &key);
@@ -147,6 +201,17 @@ pub async fn resolve_shortcode(short_code: &str, bot_id: &str, bypass_cache: boo
         save_resolve_cache(short_code, &bot, &res);
         return res;
     }
+    // An unanswered resolve used to leave no trail at all: the caller answered
+    // "Track not found" and nothing said why.
+    log(
+        "resolve returned no file id",
+        &serde_json::json!({
+            "short_code": short_code,
+            "bot_id": bot,
+            "has_size": file_size_of(&res) > 0,
+            "message": res.get("message").cloned().unwrap_or(Value::Null),
+        }),
+    );
     // A refusing origin is worth remembering: the prefetchers must not pile on.
     if note_resolve_rate_limit(&res.to_string()) {
         return res;
@@ -493,5 +558,47 @@ pub async fn warmup_resolve_batch(short_codes: &[String], bot_id: &str) -> Warmu
         failed_codes,
         results,
         bot_id: effective,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real `/resolve-files` row shape (measured against the origin): an id
+    /// and nothing else. Caching it as a resolve is what made `/eclipse/stream`
+    /// answer "Track not found" for a code that resolves fine.
+    #[test]
+    fn a_batch_row_is_never_cached_as_a_resolve() {
+        let batch = serde_json::json!({
+            "ok": 1, "short_code": "batch1", "file_id_mt": "AQADbatch", "bot_id": 8469916399i64
+        });
+        save_resolve_cache("batch1", "test-bot", &batch);
+        assert!(resolve_shortcode_cached("batch1", "test-bot").is_none());
+
+        let full = serde_json::json!({
+            "ok": 1, "file_id_mt": "AQADbatch", "file_size": 18552780,
+            "title": "02.Billie.Eilish.LUNCH.flac", "mime": "audio/x-flac"
+        });
+        save_resolve_cache("batch1", "test-bot", &full);
+        let hit = resolve_shortcode_cached("batch1", "test-bot").expect("a full row is usable");
+        assert_eq!(hit["title"], "02.Billie.Eilish.LUNCH.flac");
+    }
+
+    /// Entries already on disk from an older build must read as a MISS, not as a
+    /// metadata-less hit, or the 2 h redb copy keeps breaking playback after the
+    /// upgrade.
+    #[test]
+    fn a_stored_entry_without_a_size_reads_as_a_miss() {
+        let key = cache_key("poison1", "test-bot");
+        cache::put(
+            "resolve",
+            &key,
+            &serde_json::json!({"ok": 1, "file_id_mt": "AQADpoison"}),
+            60,
+            0,
+        );
+        assert!(cache::get("resolve", &key).is_some(), "the raw entry is there");
+        assert!(resolve_shortcode_cached("poison1", "test-bot").is_none());
     }
 }

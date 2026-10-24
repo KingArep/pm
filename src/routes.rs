@@ -47,8 +47,8 @@ use crate::resolve::{
     resolve_shortcode, resolve_shortcode_concurrent, warmup_resolve_batch,
 };
 use crate::respond::{
-    eclipse_locked_response, json_response, not_found_json, redirect, rtrim, stremio_json,
-    stremio_locked_stream, text_response,
+    allow_private_network, eclipse_locked_response, json_response, not_found_json, redirect, rtrim,
+    stremio_json, stremio_locked_stream, text_response,
 };
 use crate::session::{
     add_pool_bot, auto_provision_guest, clear_session, clock_skew_message, env_bot_tokens,
@@ -1317,7 +1317,11 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
 
     /* ── download ─────────────────────────────────────────────────────────── */
     if is_public_download_path(&p) {
-        return handle_download(&state, &ctx).await;
+        // The Eclipse web client lives on a public HTTPS origin and plays a
+        // LOOPBACK url, so the media response itself must carry
+        // `Access-Control-Allow-Private-Network` or Chrome drops it after the
+        // preflight succeeded.
+        return allow_private_network(handle_download(&state, &ctx).await);
     }
 
     /* ── addon aliases + manifest ─────────────────────────────────────────── */
@@ -1362,25 +1366,35 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
     }
 
     /* ── eclipse ──────────────────────────────────────────────────────────── */
+    // `/music` is the canonical name for this addon; `/eclipse` is kept as
+    // an alias so every URL already installed in a client keeps resolving.
+    let p = if p == "/music" || p.starts_with("/music/") {
+        p.replacen("/music", "/eclipse", 1)
+    } else {
+        p
+    };
     if p.starts_with("/eclipse") {
         if !is_authenticated(&ctx) {
             return eclipse_locked_response(&ctx.base_url);
         }
         if p == "/eclipse" || p == "/eclipse/manifest.json" {
-            // backend.php:14315-14346 verbatim: same id, name, description,
-            // `types`, the `latest` catalog row and the `quality` setting.
-            // Eclipse Music renders its catalog list and Settings sheet straight
-            // from this descriptor, so an empty `catalogs`/`settings` made the
-            // addon look installed-but-broken. The icon stays the SHIPPED logo
-            // (the PHP points at a WordPress upload; operator choice here is to
-            // never depend on that host).
+            // A UNIVERSAL music addon, not an Eclipse-branded one: the id no
+            // longer names a client, so any Stremio-compatible music app can
+            // install it. `/music` is the canonical path and `/eclipse` stays as
+            // the alias every already-installed addon URL uses.
+            //
+            // The descriptor itself is pinned to backend.php:14315-14346: same
+            // `types`, the `latest` catalog row and the `quality` setting, since
+            // clients render their catalog list and Settings sheet straight from
+            // it. The icon stays the SHIPPED logo (the PHP points at a WordPress
+            // upload; operator choice here is to never depend on that host).
             return stremio_json(
                 200,
                 &serde_json::json!({
-                    "id": "org.pencarimovie.eclipsemusic",
+                    "id": "org.pencarimovie.music",
                     "name": "PencariMusic",
-                    "version": "1.0.0",
-                    "description": "Stream Telegram music and audio files via PencariMovie Server",
+                    "version": "1.1.0",
+                    "description": "Universal music addon - stream Telegram music and audio files via PencariMovie Server",
                     "resources": ["search", "stream", "catalog"],
                     "types": ["track", "album", "artist"],
                     "contentType": "music",
@@ -5869,9 +5883,20 @@ async fn eclipse_search(query: &str, limit: usize) -> Vec<Value> {
     let mut tracks: Vec<Value> = rows
         .iter()
         .filter(|r| !str_at(r, "short_code").is_empty())
-        .map(|r| crate::eclipse::format_track(r, query))
+        .map(crate::eclipse::format_track)
         .collect();
     // Best audio first, then the longest — the addon's own ordering.
+    // One line per query: "the client found nothing to play" and "we answered
+    // nothing" look identical from the player, so log both sides.
+    log(
+        "music search",
+        &serde_json::json!({
+            "q": query,
+            "limit": limit,
+            "rows": rows.len(),
+            "tracks": tracks.len(),
+        }),
+    );
     tracks.sort_by(|a, b| {
         let ka = crate::eclipse::quality_score(
             a["format"].as_str().unwrap_or(""),
@@ -5908,6 +5933,10 @@ async fn eclipse_stream(ctx: &ReqCtx, short_code: &str) -> Response {
     if code.is_empty() {
         return stremio_json(404, &serde_json::json!({"error": "Not found"}), "no-store");
     }
+    log(
+        "music stream requested",
+        &serde_json::json!({"code": code, "quality": ctx.qs("quality")}),
+    );
     let bot = get_bot_id();
     let resolved = if bot.is_empty() {
         resolve_shortcode_concurrent(&code, &[]).await
@@ -5923,6 +5952,11 @@ async fn eclipse_stream(ctx: &ReqCtx, short_code: &str) -> Response {
         }
     };
     if file_name.is_empty() {
+        // Silent before: a 404 with no trail is impossible to debug from a phone.
+        log(
+            "eclipse stream: the resolve carried no file name",
+            &serde_json::json!({"short_code": code, "bot_id": bot, "resolved": resolved}),
+        );
         return stremio_json(404, &serde_json::json!({"error": "Track not found"}), "no-store");
     }
     let mime = {
@@ -5931,39 +5965,36 @@ async fn eclipse_stream(ctx: &ReqCtx, short_code: &str) -> Response {
         m
     };
     let size = resolved.get("file_size").and_then(|v| v.as_u64()).unwrap_or(0);
-    let lower = file_name.to_lowercase();
-    let is_alac = mime.contains("mp4") || lower.ends_with(".m4a") || lower.ends_with(".alac");
-    let served_name = if is_alac {
-        format!(
-            "{}.wav",
-            file_name
-                .rsplit_once('.')
-                .map(|(a, _)| a.to_string())
-                .unwrap_or_else(|| file_name.clone())
-        )
-    } else {
-        file_name.clone()
-    };
-    let served_mime = if is_alac {
-        "audio/wav".to_string()
-    } else if mime.is_empty() {
+    // NO renaming. The advertised `format` and `mimeType` are the file's own, and
+    // the payload names the file `/api/download` will actually read. The old
+    // `.wav` alias (inherited from backend.php) lied about the container: the
+    // payload said `X.wav` / `audio/wav`, so `is_alac_target()` answered "not
+    // ALAC" and the raw ALAC/MP4 bytes went out under `content-type: audio/wav`
+    // (measured: magic `/isom`, not `RIFF/WAVE`) — the player's "Playback error
+    // - stream unavailable". When the bytes ARE transcoded, the download
+    // response says so itself (`content-type: audio/wav`, `.wav` disposition).
+    let served_mime = if mime.is_empty() {
         "audio/mpeg".to_string()
     } else {
-        mime
+        mime.clone()
     };
+    let ext = file_name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_lowercase())
+        .unwrap_or_else(|| "mp3".to_string());
     let payload = serde_json::json!({
         "file_size": size,
-        "file_name": served_name,
-        "mime": served_mime,
+        "file_name": file_name,
+        "mime": mime,
         "short_code": code,
     });
     let b64 = crate::fileid::base64url_encode(payload.to_string().as_bytes());
-    let url = build_stream_url(&ctx.base_url, &b64, &served_name);
+    let url = build_stream_url(&ctx.base_url, &b64, &file_name);
     stremio_json(
         200,
         &serde_json::json!({
             "url": url,
-            "format": if is_alac { "wav" } else { served_name.rsplit('.').next().unwrap_or("mp3") },
+            "format": ext,
             "mimeType": served_mime,
         }),
         "no-store",

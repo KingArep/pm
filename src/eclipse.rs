@@ -1,65 +1,20 @@
-//! Eclipse Music addon — port of `fd_eclipse_parse_audio_title()`,
-//! `fd_eclipse_audio_quality_score()` and `fd_eclipse_format_track()`
-//! (backend.php:13568-14259), following the Kotlin twin
-//! (`eclipseParseAudioTitle` / `eclipseFormatTrack`), which the device builds
-//! shipped.
+//! Music addon — `fd_eclipse_audio_quality_score()` and
+//! `fd_eclipse_format_track()` (backend.php:14046-14259).
 //!
-//! The hard part is that most Telegram music files are named
-//! `Artist.Title.ext` with an **empty `performer`** and a caption that is only a
-//! short code, so there is often no separator to split on. Three strategies are
-//! tried in order, and the search query is used as a tie-breaker:
+//! TITLE AND ARTIST COME FROM THE ORIGIN, not from parsing here:
 //!
-//! 1. the caption's `Artist - Title` line (skipping relay noise and `AgAD…` codes);
-//! 2. the file name itself (` - `, `by`, or a known-artist prefix);
-//! 3. the QUERY: `query = title + extra` ⇒ the prefix is the artist;
-//!    `title = query + extra` ⇒ the query is the artist; `query == title` ⇒ split
-//!    the query at a known artist name (longest 1-3 word match, else 2 words for a
-//!    4+ word query).
+//! * `main.php` (`fastdownloader_api_audio_caption_title`) reads the caption —
+//!   the only place a contraction survives, because `tg_file_new.title` is the
+//!   file name and stores every `'` as a dot (`01.My.Body.Isn.t.Ready.m4a`) —
+//!   and returns it as `song_title` with the artist as `performer`;
+//! * a re-sent file carries the real tags, nested as
+//!   `"audio": {"title":"Be Her","performer":"Ella Langley","duration":217}`.
 //!
-//! A final reversed-order pass detects a known artist at the END of the title
-//! (`Black.or.White.Michael.Jackson` ⇒ artist `Michael Jackson`, title
-//! `Black or White`).
+//! This module only maps those onto the addon's `track` object, with a
+//! mechanical file-name fallback so nothing is ever blank: the Eclipse client
+//! matches a track by `title + artist`, so an empty artist makes it unplayable.
 
 use serde_json::Value;
-
-/// `ECLIPSE_KNOWN_ARTISTS` — copied verbatim from the Kotlin list.
-pub const KNOWN_ARTISTS: &[&str] = &[
-    "wali", "st12", "tulus", "armada", "dmasiv", "d'masiv", "cokelat", "judika", "tiara andini",
-    "tiara", "lyodra", "sheila on 7", "sheila", "dewa 19", "dewa", "peterpan", "noah", "rossa",
-    "afgan", "raisa", "yovie & nuno", "yovie", "amuk", "adele", "rihanna", "eminem", "drake",
-    "beyonce", "shakira", "sienna spiro", "billie eilish", "ariana grande", "taylor swift",
-    "luke combs", "ed sheeran", "bruno mars", "olivia rodrigo", "justin bieber", "dua lipa",
-    "lady gaga", "kelly clarkson", "selena gomez", "camila cabello", "doja cat", "katy perry",
-    "miley cyrus", "avril lavigne", "mariah carey", "whitney houston", "britney spears",
-    "michael jackson", "the weeknd", "post malone", "harry styles", "charlie puth", "shawn mendes",
-    "sam smith", "sia", "pink", "coldplay", "maroon 5", "imagine dragons", "playboi carti",
-    "doechii", "kendrick lamar", "travis scott", "metro boomin", "future", "21 savage", "sza",
-    "frank ocean", "tyler the creator", "asap rocky", "lil baby", "gunna", "young thug",
-    "nicki minaj", "cardi b", "megan thee stallion",
-];
-
-fn is_known_artist(s: &str) -> bool {
-    KNOWN_ARTISTS.contains(&s.trim().to_lowercase().as_str())
-}
-
-/// `ucwords()`: first letter of every space-separated word upper-cased.
-pub fn ucwords(s: &str) -> String {
-    s.split(' ')
-        .map(|w| {
-            let mut chars = w.chars();
-            match chars.next() {
-                Some(first) => {
-                    let mut out = String::new();
-                    out.extend(first.to_uppercase());
-                    out.push_str(chars.as_str());
-                    out
-                }
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
 
 fn rx(p: &str) -> Option<fancy_regex::Regex> {
     fancy_regex::Regex::new(p).ok()
@@ -72,117 +27,58 @@ fn rep(p: &str, text: &str, with: &str) -> String {
     }
 }
 
-fn has(p: &str, text: &str) -> bool {
-    rx(p).map(|re| re.is_match(text).unwrap_or(false)).unwrap_or(false)
-}
-
 fn collapse(s: &str) -> String {
     rep(r"\s+", s, " ").trim().to_string()
 }
 
-/// `(artist, title, isrc)`.
-pub fn parse_audio_title(raw_title: &str, caption: &str) -> (String, String, String) {
-    let mut name = rep(r"^\d+[\s.\-_]+", raw_title.trim(), "");
-    let media = r"(?i)\.(mp3|m4a|flac|wav|ogg|opus|aac|mp4|mkv|mpg)$";
-    // Strip trailing media extensions in a LOOP: `song.mp3.mp3` is real.
+fn str_at(item: &Value, key: &str) -> String {
+    item.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// A flat row column first (`song_title`, `performer`), the nested `audio.<key>`
+/// second — both shapes are what the origin actually sends.
+fn tag(item: &Value, key: &str) -> String {
+    let flat = str_at(item, key);
+    if !flat.is_empty() {
+        return flat;
+    }
+    item.get("audio")
+        .and_then(|a| a.get(key))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// `Ella.Langley.Be.Her.mp3` → `Ella Langley Be Her`
+fn name_words(file_name: &str) -> String {
+    let mut n = file_name.to_string();
+    // `song.mp3.mp3` is real, so strip in a loop.
     for _ in 0..4 {
-        if !has(media, &name) {
+        let stripped = rep(r"(?i)\.(mp3|m4a|flac|wav|ogg|opus|aac|mp4|mkv|mpg)$", &n, "");
+        if stripped == n {
             break;
         }
-        name = rep(media, &name, "");
+        n = stripped;
     }
-    name = name
-        .replace('\u{2018}', "'")
-        .replace('\u{2019}', "'")
-        .replace('`', "'");
-    name = rep(r"(?i)\bd\.masiv\b", &name, "D'MASIV");
-    name = rep(r"(?i)\bd\s+masiv\b", &name, "D'MASIV");
-    name = rep(r"\s*\[[^\]]*\]|\s*\([^\)]*\)", &name, " ");
-    name = rep(
-        r"(?i)\b(?:1080p|720p|480p|140|251|599|vc\s*trinity|nagaswara|youtube|official\s*(?:video|audio|lyric|lyrics)?|audio|lyrics?|lyrics\s*video|hd|hq|live|remix|cover|karaoke|acoustic|video)\b",
-        &name,
-        " ",
-    );
-    name = collapse(&name.replace('.', " ").replace('_', " "));
+    let n = collapse(&n.replace('.', " ").replace('_', " "));
+    collapse(&rep(r"^\d+[\s.\-_]+", &n, ""))
+}
 
-    let mut artist = String::new();
-    let mut title = name.clone();
-    let mut isrc = String::new();
-
-    if !caption.is_empty() {
-        if let Some(re) = rx(r"\[([A-Z]{2}[A-Z0-9]{3}[0-9]{7})\]") {
-            if let Ok(Some(caps)) = re.captures(caption) {
-                if let Some(g) = caps.get(1) {
-                    isrc = g.as_str().to_string();
-                }
-            }
-        }
-        for line_raw in caption.split('\n') {
-            if !artist.is_empty() {
-                break;
-            }
-            let line = line_raw.trim();
-            if has(r"(?i)^(?:forwarded\s+from|forwarded|via|from)\b", line) {
-                continue;
-            }
-            if let Some(re) = rx("^([^\\-]+?)\\s*[\\-\u{2013}\u{2014}]\\s*([^\\[]+)") {
-                if let Ok(Some(caps)) = re.captures(line) {
-                    let ca = caps.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
-                    let ct = caps.get(2).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
-                    if !ca.is_empty()
-                        && !ct.is_empty()
-                        && !ca.starts_with('#')
-                        && !ca.starts_with('@')
-                        && !has(r"^(?:AgAD|AQAD)", &ca)
-                    {
-                        artist = ca;
-                        title = ct;
-                    }
-                }
-            }
-        }
-    }
-
+/// Drop a leading `performer` (and any separator after it) from a name.
+fn strip_artist(name: &str, artist: &str) -> String {
     if artist.is_empty() {
-        let split = rx("^([^\\-]+?)\\s*[\\-\u{2013}\u{2014}]\\s*(.+)$")
-            .and_then(|re| re.captures(&name).ok().flatten())
-            .map(|caps| {
-                (
-                    caps.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default(),
-                    caps.get(2).map(|m| m.as_str().trim().to_string()).unwrap_or_default(),
-                )
-            });
-        if let Some((a, t)) = split {
-            artist = a;
-            title = t;
-        } else if let Some(caps) = rx("(?i)^(.+?)\\s+by\\s+(.+)$")
-            .and_then(|re| re.captures(&name).ok().flatten())
-        {
-            title = caps.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
-            artist = caps.get(2).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
-        } else {
-            let words: Vec<&str> = name.split(' ').filter(|w| !w.is_empty()).collect();
-            if words.len() >= 2 {
-                if words.len() >= 3 {
-                    let two = format!("{} {}", words[0], words[1]);
-                    if is_known_artist(&two) {
-                        artist = two;
-                        title = words[2..].join(" ");
-                    }
-                }
-                if artist.is_empty() && is_known_artist(words[0]) {
-                    artist = words[0].to_string();
-                    title = words[1..].join(" ");
-                }
-            }
-        }
+        return name.to_string();
     }
-
-    title = collapse(&rep(r"[^\p{L}\p{N}\s']+", &title, " "));
-    if artist.is_empty() {
-        artist = name;
-    }
-    (artist, title, isrc)
+    collapse(&rep(
+        &format!("(?i)^{}[\\s\\-:\u{2013}\u{2014}]+", fancy_regex::escape(artist)),
+        name,
+        "",
+    ))
 }
 
 /// `fd_eclipse_audio_quality_score()` — higher is better.
@@ -198,116 +94,48 @@ pub fn quality_score(ext: &str, size_bytes: u64) -> i64 {
     weight + bonus
 }
 
-fn str_at(item: &Value, key: &str) -> String {
-    item.get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string()
-}
-
 /// `fd_eclipse_format_track()` — one `track` object for the addon.
-pub fn format_track(item: &Value, search_query: &str) -> Value {
-    let caption = item.get("caption").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let (mut artist, mut title, isrc) = parse_audio_title(&str_at(item, "title"), &caption);
-    let mut performer = str_at(item, "performer");
-
-    let bot_line = |cap: &str| -> Option<String> {
-        rx("@\\w+\\s+(.+)$")
-            .and_then(|re| re.captures(cap).ok().flatten())
-            .and_then(|caps| caps.get(1).map(|m| m.as_str().trim().to_string()))
+pub fn format_track(item: &Value) -> Value {
+    // `file_name` is the real name of the file; the flat `title` column is that
+    // same name, so it is a name, never a song title.
+    let file_name = {
+        let f = tag(item, "file_name");
+        if f.is_empty() {
+            str_at(item, "title")
+        } else {
+            f
+        }
     };
+    let mut artist = tag(item, "performer");
+    let mut title = tag(item, "song_title");
 
-    if performer.is_empty() && !caption.is_empty() {
-        if let Some(rest) = bot_line(&caption) {
-            let words: Vec<&str> = rest.split_whitespace().collect();
-            if words.len() >= 2 {
-                let candidate = words[words.len() - 1];
-                if candidate.chars().count() >= 3
-                    && !has(r"(?i)^(?:m4a|mp3|flac|wav|ogg|opus)$", candidate)
-                {
-                    performer = candidate.to_string();
-                }
-            }
-        }
+    let name = name_words(&file_name);
+    if title.is_empty() {
+        title = strip_artist(&name, &artist);
     }
-    if !performer.is_empty() {
-        artist = performer.clone();
-        let pattern = format!(
-            "(?i)^{}[\\s\\-\u{2013}\u{2014}:]+",
-            fancy_regex::escape(&performer)
-        );
-        title = collapse(&rep(&pattern, &title, ""));
-    }
-    if artist.is_empty() || artist.eq_ignore_ascii_case(&title) {
-        if let Some(rest) = bot_line(&caption) {
-            let words: Vec<&str> = rest.split_whitespace().collect();
-            if words.len() >= 2 {
-                artist = words[words.len() - 1].to_string();
-            }
-        }
+    if artist.is_empty() {
+        artist = name.clone();
     }
 
-    // Query-based splitting (the three rules in the module docs).
-    if !search_query.is_empty() && (artist.is_empty() || artist.eq_ignore_ascii_case(&title)) {
-        let norm = |s: &str| collapse(&rep(r"[^\p{L}\p{N}\s]+", s, " ").to_lowercase());
-        let norm_title = norm(&title);
-        let norm_query = norm(search_query);
-        if !norm_title.is_empty() && !norm_query.is_empty() {
-            if norm_query.starts_with(&norm_title) {
-                let extra = norm_query[norm_title.len()..].trim().to_string();
-                if !extra.is_empty() {
-                    artist = title.clone();
-                    title = ucwords(&extra);
-                }
-            } else if norm_title.starts_with(&norm_query) {
-                let extra = norm_title[norm_query.len()..].trim().to_string();
-                if !extra.is_empty() {
-                    artist = search_query.to_string();
-                    title = ucwords(&extra);
-                }
-            } else if norm_title == norm_query {
-                let qw: Vec<&str> = norm_query.split_whitespace().collect();
-                let mut split_at = 0usize;
-                let upper = std::cmp::min(3, qw.len().saturating_sub(1));
-                for n in (1..=upper).rev() {
-                    if is_known_artist(&qw[..n].join(" ")) {
-                        split_at = n;
-                        break;
-                    }
-                }
-                if split_at == 0 && qw.len() >= 4 {
-                    split_at = 2;
-                }
-                if split_at > 0 && split_at < qw.len() {
-                    artist = ucwords(&qw[..split_at].join(" "));
-                    title = ucwords(&qw[split_at..].join(" "));
-                }
-            }
+    let ext = {
+        let e = tag(item, "extension").to_lowercase();
+        if e.is_empty() || e == "noext" {
+            file_name
+                .rsplit_once('.')
+                .map(|(_, e)| e.to_lowercase())
+                .unwrap_or_default()
+        } else {
+            e
         }
-    }
+    };
+    let ext = if ext.is_empty() { "mp3".to_string() } else { ext };
 
-    // Reversed order: a known artist at the END of the title.
-    if artist.is_empty() || artist.eq_ignore_ascii_case(&title) {
-        let tw: Vec<&str> = title.split_whitespace().collect();
-        if tw.len() >= 3 {
-            let upper = std::cmp::min(3, tw.len() - 1);
-            for n in (1..=upper).rev() {
-                let tail = tw[tw.len() - n..].join(" ");
-                if is_known_artist(&tail) {
-                    artist = ucwords(&tail);
-                    title = ucwords(&tw[..tw.len() - n].join(" "));
-                    break;
-                }
-            }
-        }
-    }
-
-    let mut ext = str_at(item, "extension").to_lowercase();
-    if ext.is_empty() || ext == "noext" {
-        ext = "mp3".to_string();
-    }
-    let duration = item.get("duration").and_then(|v| v.as_i64()).unwrap_or(0);
+    let duration = item
+        .get("audio")
+        .and_then(|a| a.get("duration"))
+        .and_then(|v| v.as_i64())
+        .or_else(|| item.get("duration").and_then(|v| v.as_i64()))
+        .unwrap_or(0);
 
     let mut track = serde_json::json!({
         "id": str_at(item, "short_code"),
@@ -315,15 +143,17 @@ pub fn format_track(item: &Value, search_query: &str) -> Value {
         "artist": artist,
         "duration": duration,
         "durationMs": if duration > 0 { duration * 1000 } else { 180000 },
-        // Eclipse/Android cannot decode ALAC in `.m4a`; the download path
-        // decodes those to PCM and serves them as WAV, so the advertised
-        // format (and the served URL extension) follow suit.
-        "format": if ext == "m4a" || ext == "alac" { "wav".to_string() } else { ext },
+        // The file's real container. No `.wav` alias: that rename is the
+        // legacy trick that made the download path skip the ALAC transcode and
+        // answer `audio/wav` with raw MP4 bytes.
+        "format": ext,
     });
-    if !isrc.is_empty() {
-        track["isrc"] = serde_json::json!(isrc);
+    for (key, value) in [("album", tag(item, "album")), ("isrc", tag(item, "isrc"))] {
+        if !value.is_empty() {
+            track[key] = serde_json::json!(value);
+        }
     }
-    let thumb = str_at(item, "thumbnail_url");
+    let thumb = tag(item, "thumbnail_url");
     if !thumb.is_empty() {
         track["artworkURL"] = serde_json::json!(thumb);
     }
@@ -334,64 +164,84 @@ pub fn format_track(item: &Value, search_query: &str) -> Value {
 mod tests {
     use super::*;
 
+    /// The re-sent-file shape: real tags, nothing to derive.
     #[test]
-    fn splits_artist_dash_title_from_caption() {
-        let (artist, title, _) = parse_audio_title(
-            "01 Adele - Hello.mp3",
-            "Adele - Hello\nsome other text\n[AABB1122333]",
-        );
-        assert_eq!(artist, "Adele");
-        assert_eq!(title, "Hello");
+    fn uses_the_audio_tags_from_the_resolve() {
+        let track = format_track(&serde_json::json!({
+            "short_code": "wULLeI",
+            "audio": {
+                "duration": 217,
+                "file_name": "Ella Langley - Be Her.flac",
+                "mime_type": "audio/x-flac",
+                "title": "Be Her",
+                "performer": "Ella Langley"
+            }
+        }));
+        assert_eq!(track["title"], "Be Her");
+        assert_eq!(track["artist"], "Ella Langley");
+        assert_eq!(track["duration"], 217);
+        assert_eq!(track["durationMs"], 217000);
+        assert_eq!(track["format"], "flac");
     }
 
+    /// The `/search-music` row shape: `song_title` is the origin's caption
+    /// parse, which is the only place a `'` survives.
     #[test]
-    fn splits_dash_in_filename_and_strips_noise() {
-        let (artist, title, _) = parse_audio_title("02 Wali - Yank.mp3", "");
-        assert_eq!(artist, "Wali");
-        assert_eq!(title, "Yank");
+    fn song_title_from_the_origin_beats_the_file_name() {
+        let track = format_track(&serde_json::json!({
+            "short_code": "8VRbcL",
+            "title": "01.My.Body.Isn.t.Ready.m4a",
+            "song_title": "My Body Isn't Ready",
+            "performer": "sombr",
+            "extension": "m4a",
+            "duration": 217
+        }));
+        assert_eq!(track["title"], "My Body Isn't Ready");
+        assert_eq!(track["artist"], "sombr");
+        assert_eq!(track["format"], "m4a");
     }
 
+    /// No `song_title` (an older origin): the name minus the performer.
     #[test]
-    fn uses_known_artist_prefix() {
-        let (artist, title, _) = parse_audio_title("Tulus Monokrom", "");
-        assert_eq!(artist, "Tulus");
-        assert_eq!(title, "Monokrom");
+    fn falls_back_to_the_name_minus_the_performer() {
+        let track = format_track(&serde_json::json!({
+            "short_code": "wULLeI",
+            "title": "Ella.Langley.Be.Her.mp3",
+            "performer": "Ella Langley",
+            "extension": "mp3",
+            "duration": 217
+        }));
+        assert_eq!(track["artist"], "Ella Langley");
+        assert_eq!(track["title"], "Be Her");
+        assert_eq!(track["format"], "mp3");
     }
 
+    /// The client re-matches a track by `title + artist`, so this must never be
+    /// empty — `backend.php` derives one from the name too.
     #[test]
-    fn reversed_order_detects_trailing_artist() {
-        let track = format_track(
-            &serde_json::json!({
-                "title": "Black.or.White.Michael.Jackson",
-                "caption": "",
-                "short_code": "abc123",
-                "extension": "mp3",
-                "duration": 200
-            }),
-            "",
-        );
-        assert_eq!(track["artist"], "Michael Jackson");
-        assert_eq!(track["title"], "Black Or White");
-        assert_eq!(track["durationMs"], 200000);
-    }
-
-    #[test]
-    fn query_split_title_plus_artist() {
-        // query = "<title> <artist>" ⇒ the prefix is the artist.
-        let track = format_track(
-            &serde_json::json!({
-                "title": "Timeless",
-                "caption": "",
-                "short_code": "x1",
-                "extension": "m4a"
-            }),
-            "Timeless The Weeknd",
-        );
-        assert_eq!(track["artist"], "Timeless");
-        assert_eq!(track["title"], "The Weeknd");
-        // m4a is advertised as wav because the downloader decodes it to PCM.
-        assert_eq!(track["format"], "wav");
+    fn a_name_without_a_separator_is_its_own_artist() {
+        let track = format_track(&serde_json::json!({
+            "short_code": "dKnM62",
+            "title": "back.to.friends.wav",
+            "extension": "wav"
+        }));
+        assert_eq!(track["artist"], "back to friends");
+        assert_eq!(track["title"], "back to friends");
         assert_eq!(track["durationMs"], 180000);
+    }
+
+    /// No `.wav` alias: the advertised format is the container that is actually
+    /// stored, and the transcode announces itself in the response headers.
+    #[test]
+    fn an_alac_m4a_keeps_its_real_format() {
+        let track = format_track(&serde_json::json!({
+            "short_code": "x1",
+            "title": "Adele.Hello.m4a",
+            "performer": "Adele",
+            "extension": "m4a"
+        }));
+        assert_eq!(track["title"], "Hello");
+        assert_eq!(track["format"], "m4a");
     }
 
     #[test]

@@ -748,7 +748,34 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
             let entry_bot = jstr(&entry, "bot_id");
             let same_bot = entry_bot.is_empty() || entry_bot == eff_bot;
             let verified = entry.get("verified_at").and_then(|v| v.as_i64()).unwrap_or(0);
-            let fresh_enough = verified == 0 || now() - verified < 21600;
+            let resolved = entry.get("resolved_at").and_then(|v| v.as_i64()).unwrap_or(0);
+            // A `file_reference` lives ~1 h, so an id is trusted only while it is
+            // younger than that — measured, not guessed:
+            //   • the reference inside a 2 h-cached id was ALWAYS dead, so every
+            //     Eclipse track logged `FILE_REFERENCE_EXPIRED` on its first byte
+            //     and then re-resolved;
+            //   • the browser's `<audio>` gives the response ~20 s before it fires
+            //     `error` ("Playback error - stream unavailable"), and the forced
+            //     re-resolve can take longer than that.
+            // An id that was never PROVEN by a real fetch (`verified_at == 0`) is
+            // therefore only trusted while it is minutes old; anything older — or
+            // any entry saved by an older build, which has neither stamp — is
+            // refreshed BEFORE the first byte instead of after a failed one.
+            let stamped = if verified > 0 { verified } else { resolved };
+            let fresh_enough = stamped > 0 && now() - stamped < 3000;
+            if !cached_id.is_empty() && !(fresh_enough && same_bot) {
+                // Drop it, or the resolve below hands the same dead reference
+                // straight back and the Play fails on the first byte.
+                invalidate_resolve_cache(&short_code, &eff_bot);
+                log(
+                    "cached file_id refused as stale - refreshing before the first byte",
+                    &serde_json::json!({
+                        "short_code": short_code,
+                        "verified_age_s": if verified > 0 { now() - verified } else { -1 },
+                        "resolved_age_s": if resolved > 0 { now() - resolved } else { -1 },
+                    }),
+                );
+            }
             if !cached_id.is_empty() && fresh_enough && same_bot {
                 if cached_id != file_id {
                     log(
@@ -1176,8 +1203,16 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
     // served as WAV — BEFORE the byte-for-byte path below (the PHP port
     // transcoded it to FLAC on disk instead; see `serve_alac`). `None` means
     // "not decodable after all", and the normal download runs unchanged.
-    if is_alac_target(&file_name, &file_mime) {
+    // An `.m4a` that is AAC (not ALAC) has no decoder and must be served raw —
+    // the browser plays it natively. Remember that verdict, or EVERY Range
+    // request pulls the whole file into memory just to learn it again.
+    let alac_key = format!("{}:{}", short_code, file_mime);
+    let alac_skipped = !short_code.is_empty()
+        && crate::cache::get("alac_skip", &alac_key).is_some();
+    if is_alac_target(&file_name, &file_mime) && !alac_skipped {
         let (alac_client, alac_gate) = entry.pick_slot();
+        let head_only = ctx.method.eq_ignore_ascii_case("HEAD");
+        let mut undecodable = false;
         if let Some(resp) = serve_alac(
             &alac_client,
             alac_gate.as_ref(),
@@ -1186,11 +1221,53 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
             &file_name,
             &range_header,
             &short_code,
-            ctx.method.eq_ignore_ascii_case("HEAD"),
+            head_only,
+            &mut undecodable,
         )
         .await
         {
             return resp;
+        }
+        if undecodable && !short_code.is_empty() {
+            crate::cache::put("alac_skip", &alac_key, &serde_json::json!(1), 3600, 0);
+        }
+        // The transcode bails out on a dead `file_reference` (logged as
+        // "alac fetch failed") and the raw path below would then hand ALAC bytes
+        // to a client that is waiting for PCM — "stream unavailable" again.
+        // Refresh the reference ONCE and transcode again.
+        if !short_code.is_empty() && !bot_id.is_empty() {
+            invalidate_resolve_cache(&short_code, &bot_id);
+            let fresh = resolve_shortcode_fresh(&short_code, &bot_id).await;
+            let new_id = id_of(&fresh);
+            if !new_id.is_empty() && new_id != file_id {
+                if let Ok(t) = prepare_file_target(&new_id, file_size) {
+                    target = t;
+                    file_id = new_id;
+                    log(
+                        "alac target refreshed after a failed fetch",
+                        &serde_json::json!({"short_code": short_code, "bot_id": bot_id}),
+                    );
+                    let mut retry_undecodable = false;
+                    if let Some(resp) = serve_alac(
+                        &alac_client,
+                        alac_gate.as_ref(),
+                        &target,
+                        file_size,
+                        &file_name,
+                        &range_header,
+                        &short_code,
+                        head_only,
+                        &mut retry_undecodable,
+                    )
+                    .await
+                    {
+                        return resp;
+                    }
+                    if retry_undecodable && !short_code.is_empty() {
+                        crate::cache::put("alac_skip", &alac_key, &serde_json::json!(1), 3600, 0);
+                    }
+                }
+            }
         }
     }
 
@@ -1799,7 +1876,26 @@ async fn serve_alac(
     range_header: &str,
     short_code: &str,
     head_only: bool,
+    undecodable: &mut bool,
 ) -> Option<Response> {
+    // Fast path: a WAV this track already produced on an earlier request.
+    //
+    // ALAC has no random access and the container index needs the WHOLE file, so
+    // decoding per Range re-downloaded the entire track for every seek —
+    // measured 40-50 s per range on a 6.5 MB `.m4a`, far past the ~20 s the
+    // browser's player waits before it reports "stream unavailable".
+    if let Some(path) = alac_wav_path(short_code) {
+        if let Ok(total) = std::fs::metadata(&path).map(|m| m.len()) {
+            if total > crate::audio::WAV_HEADER_LEN {
+                if let Some(resp) =
+                    alac_serve_cached(&path, total, file_name, range_header, head_only, short_code)
+                {
+                    return Some(resp);
+                }
+            }
+        }
+    }
+
     let mut data: Vec<u8> = Vec::with_capacity(file_size.min(64 * crate::telegram::MB) as usize);
     let mut pos = 0u64;
     while pos < file_size {
@@ -1834,6 +1930,9 @@ async fn serve_alac(
     let info = match crate::audio::probe_why(&data) {
         Ok(info) => info,
         Err(why) => {
+            // Not ALAC (an AAC `.m4a`, or a container with no decoder): the raw
+            // bytes are playable on their own, so remember the verdict.
+            *undecodable = true;
             log(
                 "alac probe rejected the file, falling back to the raw download",
                 &serde_json::json!({
@@ -1915,6 +2014,19 @@ async fn serve_alac(
         }
     }
 
+    // A request for the WHOLE stream is what the player opens first, and that
+    // body is the complete WAV — keep it so every later Range is a disk read.
+    if !head_only && start == 0 && body.len() as u64 == total {
+        if let Some(path) = alac_wav_path(short_code) {
+            if let Err(e) = std::fs::write(&path, &body) {
+                log(
+                    "alac wav cache write failed",
+                    &serde_json::json!({"short_code": short_code, "error": e.to_string()}),
+                );
+            }
+        }
+    }
+
     let status = if range.is_some() { 206 } else { 200 };
     let sent = if head_only {
         end.saturating_sub(start) + 1
@@ -1965,6 +2077,91 @@ async fn serve_alac(
     }))
 }
 
+/// `<storage>/cache/alac_<short_code>.wav` — the decoded form of an ALAC track,
+/// kept so a seek does not re-download the whole file.
+fn alac_wav_path(short_code: &str) -> Option<std::path::PathBuf> {
+    if short_code.trim().is_empty() {
+        return None;
+    }
+    Some(crate::storage::cache_path(&format!("alac_{}.wav", short_code)))
+}
+
+/// Serve a Range (or the whole body, or a HEAD) straight from a decoded WAV.
+/// `None` = unsatisfiable, so the caller answers through its own 416 path.
+fn alac_serve_cached(
+    path: &std::path::Path,
+    total: u64,
+    file_name: &str,
+    range_header: &str,
+    head_only: bool,
+    short_code: &str,
+) -> Option<Response> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let range = if range_header.trim().is_empty() {
+        None
+    } else {
+        Some(parse_range_header(range_header, total)?)
+    };
+    let (start, end) = match range {
+        Some(r) => (r.start, r.end),
+        None => (0, total.saturating_sub(1)),
+    };
+    let span = end.saturating_sub(start) + 1;
+    let mut body: Vec<u8> = Vec::new();
+    if !head_only {
+        let mut file = std::fs::File::open(path).ok()?;
+        file.seek(SeekFrom::Start(start)).ok()?;
+        body.resize(span as usize, 0);
+        let mut got = 0usize;
+        while got < body.len() {
+            match file.read(&mut body[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(_) => break,
+            }
+        }
+        body.truncate(got);
+        if body.is_empty() {
+            return None;
+        }
+    }
+    let sent = if head_only { span } else { body.len() as u64 };
+    let status = if range.is_some() { 206 } else { 200 };
+    let mut builder = Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
+        .header(header::CONTENT_TYPE, "audio/wav")
+        .header(header::CONTENT_LENGTH, sent.to_string())
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!(
+                "inline; filename*=UTF-8''{}",
+                percent_encode(&replace_ext(file_name, "wav"))
+            ),
+        )
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(
+            "Access-Control-Expose-Headers",
+            "Accept-Ranges, Content-Range, Content-Length, Content-Type",
+        );
+    if status == 206 {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, start + sent - 1, total),
+        );
+    }
+    log(
+        "alac served from the decoded wav cache",
+        &serde_json::json!({"short_code": short_code, "range": range_header, "sent": sent, "total": total}),
+    );
+    Some(builder.body(Body::from(body)).unwrap_or_else(|_| {
+        json_response(500, &serde_json::json!({"ok": 0, "message": "response build failed"}))
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1977,6 +2174,18 @@ mod tests {
 
         let mkv = "Movie.2026.mkv";
         assert_eq!(guess_video_mime(mkv, ""), "video/x-matroska");
+    }
+
+    /// The stream URL advertises `.wav` for an ALAC source, but the PAYLOAD
+    /// names the file that will actually be read. If the renamed `.wav` leaks
+    /// into the payload, this says "not ALAC" and the raw MP4 goes out under
+    /// `content-type: audio/wav` — the player's "stream unavailable".
+    #[test]
+    fn alac_is_decided_from_the_source_name_not_the_advertised_one() {
+        assert!(is_alac_target("07.Cinnamon.Girl.m4a", "audio/mp4"));
+        assert!(is_alac_target("07.Cinnamon.Girl.m4a", ""));
+        assert!(is_alac_target("track.alac", "audio/x-alac"));
+        assert!(!is_alac_target("07.Cinnamon.Girl.wav", "audio/wav"));
     }
 
     #[test]

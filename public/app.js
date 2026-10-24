@@ -1218,6 +1218,10 @@ class PencariMovieApp {
       const tokenPrefix = this._authToken ? "/".concat(encodeURIComponent(this._authToken)) : "";
       const pageHost = window.location.hostname;
       const isLocal = pageHost === "localhost" || pageHost === "127.0.0.1" || pageHost === "::1";
+      // A page opened from a LAN address is "not local" but its origin must never
+      // be handed to the music addon: that IP changes with DHCP. Only a real
+      // hostname (a domain, or the tunnel) is a stable address.
+      const pageHostIsLan = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(pageHost) || /\.local$/i.test(pageHost) || pageHost === "0.0.0.0";
       const localUrl = "http://127.0.0.1".concat(portSuffix).concat(tokenPrefix, "/manifest.json");
       let serverUrl = !isLocal && !onTunnel ? "".concat(window.location.origin.replace(/\/+$/, "")).concat(tokenPrefix, "/manifest.json") : "";
       const lanHost = isUsableLanHost(this.lanIp) ? this.lanIp : isUsableLanHost(pageHost) ? pageHost : "";
@@ -1242,19 +1246,21 @@ class PencariMovieApp {
       if (serverUrl && (onTunnel || tunnelManifest && (serverUrl === tunnelManifest || pageHost.toLowerCase() === tunnelHost))) {
         serverUrl = "";
       }
-      let eclipseBase = "";
+      // Order: TUNNEL, then SERVER/DOMAIN (the origin this page was opened
+      // from), then loopback. A LAN IP is never used — that address changes with
+      // DHCP, so the addon URL would rot. `/music` is the canonical path
+      // (`/eclipse` stays an alias).
+      let musicBase = "";
       if (onTunnel && tunnelUrl) {
-        eclipseBase = "".concat(tunnelUrl).concat(tokenPrefix);
-      } else if (!isLocal) {
-        eclipseBase = "".concat(window.location.origin.replace(/\/+$/, "")).concat(tokenPrefix);
+        musicBase = "".concat(tunnelUrl).concat(tokenPrefix);
+      } else if (!isLocal && !pageHostIsLan) {
+        musicBase = "".concat(window.location.origin.replace(/\/+$/, "")).concat(tokenPrefix);
       } else if (tunnelUrl) {
-        eclipseBase = "".concat(tunnelUrl).concat(tokenPrefix);
-      } else if (lanUrl) {
-        eclipseBase = lanUrl.replace(/\/manifest\.json.*$/i, "");
+        musicBase = "".concat(tunnelUrl).concat(tokenPrefix);
       } else {
-        eclipseBase = localUrl.replace(/\/manifest\.json.*$/i, "");
+        musicBase = "http://127.0.0.1".concat(portSuffix).concat(tokenPrefix);
       }
-      const eclipseUrl = "".concat(eclipseBase, "/eclipse/manifest.json");
+      const eclipseUrl = "".concat(musicBase, "/music/manifest.json");
       return {
         localUrl,
         serverUrl,
@@ -1526,7 +1532,7 @@ class PencariMovieApp {
         manifestEclipseInput.select();
         yield this.copyToClipboard(manifestEclipseInput.value, manifestEclipseInput);
         flashCopyBtn2(copyAddonEclipseBtn);
-        showCopiedFeedback("\u2713 Copied Eclipse Music Addon URL to clipboard!");
+        showCopiedFeedback("\u2713 Copied MUSIC MANIFEST URL to clipboard!");
       }));
     }
     const setStremioSyncStatus = (message, kind = "") => {

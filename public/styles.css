@@ -2190,3 +2190,14 @@
   min-height: 0 !important;
   height: auto !important;
 }
+
+/* The addon card has four copy rows; the buttons are a fixed 38px box so the
+   inputs beside them have to match, or the rows do not line up. */
+#addonManifestInput,
+#addonManifestLanInput,
+#addonManifestTunnelInput,
+#addonManifestEclipseInput {
+  height: 38px;
+  border-radius: 8px;
+  box-sizing: border-box;
+}

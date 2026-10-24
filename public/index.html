@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" href="logo.png?v=20261021b" />
     <link rel="apple-touch-icon" href="logo.png?v=20261021b" />
     <link rel="stylesheet" href="stream-theme.css?v=20261009pm10" />
-    <link rel="stylesheet" href="styles.css?v=20261024fix1" />
+    <link rel="stylesheet" href="styles.css?v=20261024music2" />
     <link
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
@@ -1418,8 +1418,12 @@
               style="
                 flex: 0 0 auto;
                 white-space: nowrap;
-                padding: 8px 16px;
+                padding: 0 16px;
+                height: 38px;
+                min-width: 104px;
                 font-size: 0.85rem;
+                border-radius: 8px;
+                box-sizing: border-box;
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
@@ -1479,8 +1483,12 @@
                 color: #ddd;
                 flex: 0 0 auto;
                 white-space: nowrap;
-                padding: 8px 16px;
+                padding: 0 16px;
+                height: 38px;
+                min-width: 104px;
                 font-size: 0.85rem;
+                border-radius: 8px;
+                box-sizing: border-box;
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
@@ -1535,8 +1543,12 @@
               style="
                 flex: 0 0 auto;
                 white-space: nowrap;
-                padding: 8px 16px;
+                padding: 0 16px;
+                height: 38px;
+                min-width: 104px;
                 font-size: 0.85rem;
+                border-radius: 8px;
+                box-sizing: border-box;
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
@@ -1571,7 +1583,7 @@
           </a>
         </div>
 
-        <!-- Eclipse Music Addon Field -->
+        <!-- Music addon manifest -->
         <div class="settings-gate__field" style="margin-top: 16px;">
           <div
             style="
@@ -1586,7 +1598,7 @@
               for="addonManifestEclipseInput"
               style="margin-bottom: 0"
             >
-              🎵 Eclipse Music Addon URL
+              🎵 MUSIC MANIFEST
             </label>
             <span
               style="
@@ -1615,9 +1627,14 @@
               style="
                 flex: 0 0 auto;
                 white-space: nowrap;
-                padding: 8px 16px;
+                padding: 0 16px;
+                height: 38px;
+                min-width: 104px;
                 font-size: 0.85rem;
+                border-radius: 8px;
+                box-sizing: border-box;
                 background: #e11d48;
+                color: #fff;
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
@@ -1627,9 +1644,6 @@
               📋 Copy
             </button>
           </div>
-          <p style="font-size: 0.76rem; color: #a1a1aa; margin-top: 6px;">
-            In Eclipse Music: <strong>Settings ➔ Connections ➔ Add Connection ➔ Addon</strong> and paste this URL.
-          </p>
         </div>
 
         <div id="addonCopiedStatus" class="settings-gate__status ok hidden">
@@ -1826,6 +1840,6 @@
         }
       })();
     </script>
-    <script defer src="app.js?v=20261024fix1"></script>
+    <script defer src="app.js?v=20261024music1"></script>
   </body>
 </html>

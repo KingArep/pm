@@ -22,6 +22,26 @@ const CORS: [(&str, &str); 5] = [
     ("Access-Control-Allow-Private-Network", "true"),
 ];
 
+/// Stamp the full CORS set (including `Access-Control-Allow-Private-Network`)
+/// onto a hand-built response.
+///
+/// Chrome's Private Network Access blocks a page on a public HTTPS origin
+/// (`https://eclipsemusic.app`) from reading a **loopback** response unless the
+/// RESPONSE says `Access-Control-Allow-Private-Network: true` — passing the
+/// `OPTIONS` preflight is not enough, it only earns the request the right to be
+/// SENT. The media responses in [`crate::download`] are built by hand, so they
+/// are stamped here at the single dispatch point: every branch (206, 503, 400,
+/// HEAD) inherits it, and `Access-Control-Allow-Origin: *` is left untouched.
+pub fn allow_private_network(mut resp: Response) -> Response {
+    let h = resp.headers_mut();
+    for (k, v) in CORS {
+        if !h.contains_key(k) {
+            h.insert(k, axum::http::HeaderValue::from_static(v));
+        }
+    }
+    resp
+}
+
 pub fn json_response(status: u16, body: &Value) -> Response {
     let text = serde_json::to_string(body).unwrap_or_else(|_| "{}".to_string());
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
