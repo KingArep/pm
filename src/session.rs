@@ -369,10 +369,12 @@ pub fn remove_pool_bot(bot_id: &str) -> Vec<Value> {
     get_bot_pool()
 }
 
-pub fn pick_pool_bot() -> Option<Value> {
-    let pool = get_bot_pool();
-    let active = get_bot_id();
-    let ts = now();
+pub fn filter_and_pick_pool_bot<'a>(
+    pool: &'a [Value],
+    ts: i64,
+    has_session: impl Fn(&str) -> bool,
+    idx: usize,
+) -> Option<(&'a Value, usize)> {
     let valid: Vec<&Value> = pool
         .iter()
         .filter(|b| {
@@ -384,28 +386,41 @@ pub fn pick_pool_bot() -> Option<Value> {
             if cooldown > ts {
                 return false;
             }
-            crate::telegram::has_session_file(id)
+            has_session(id)
         })
         .collect();
     if valid.is_empty() {
-        if !active.is_empty() {
-            let meta = load_session_meta();
-            return Some(serde_json::json!({
-                "bot_id": active,
-                "bot_username": meta.get("bot_username").and_then(|v| v.as_str()).unwrap_or(""),
-                "bot_name": meta.get("bot_name").and_then(|v| v.as_str()).unwrap_or(""),
-            }));
-        }
         return None;
     }
+    let picked_idx = idx % valid.len();
+    let next_idx = (idx + 1) % valid.len();
+    Some((valid[picked_idx], next_idx))
+}
+
+pub fn pick_pool_bot() -> Option<Value> {
+    let pool = get_bot_pool();
+    let active = get_bot_id();
+    let ts = now();
     let rr = storage_path("rr_bot_index.txt");
     let idx: usize = fs::read_to_string(&rr)
         .ok()
         .and_then(|t| t.trim().parse::<usize>().ok())
         .unwrap_or(0);
-    let picked = valid[idx % valid.len()].clone();
-    let _ = fs::write(&rr, ((idx + 1) % valid.len()).to_string());
-    Some(picked)
+
+    if let Some((picked, next)) = filter_and_pick_pool_bot(&pool, ts, crate::telegram::has_session_file, idx) {
+        let _ = fs::write(&rr, next.to_string());
+        return Some(picked.clone());
+    }
+
+    if !active.is_empty() {
+        let meta = load_session_meta();
+        return Some(serde_json::json!({
+            "bot_id": active,
+            "bot_username": meta.get("bot_username").and_then(|v| v.as_str()).unwrap_or(""),
+            "bot_name": meta.get("bot_name").and_then(|v| v.as_str()).unwrap_or(""),
+        }));
+    }
+    None
 }
 
 /// Exactly ONE guest bot is leased per instance — no more, and there is **no
@@ -795,6 +810,59 @@ mod tests {
         let mut out = Vec::new();
         parse_token_list("", &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn round_robin_spreads_across_valid_pool_bots() {
+        let pool = vec![
+            serde_json::json!({"bot_id": "111", "cooldown_until": 0}),
+            serde_json::json!({"bot_id": "222", "cooldown_until": 0}),
+            serde_json::json!({"bot_id": "333", "cooldown_until": 0}),
+        ];
+        let has_session = |_id: &str| true;
+        let ts = 1000;
+
+        let (first, next1) = filter_and_pick_pool_bot(&pool, ts, has_session, 0).unwrap();
+        assert_eq!(first["bot_id"], "111");
+        assert_eq!(next1, 1);
+
+        let (second, next2) = filter_and_pick_pool_bot(&pool, ts, has_session, next1).unwrap();
+        assert_eq!(second["bot_id"], "222");
+        assert_eq!(next2, 2);
+
+        let (third, next3) = filter_and_pick_pool_bot(&pool, ts, has_session, next2).unwrap();
+        assert_eq!(third["bot_id"], "333");
+        assert_eq!(next3, 0);
+
+        // Wraps back to first bot
+        let (fourth, next4) = filter_and_pick_pool_bot(&pool, ts, has_session, next3).unwrap();
+        assert_eq!(fourth["bot_id"], "111");
+        assert_eq!(next4, 1);
+    }
+
+    #[test]
+    fn round_robin_skips_cooldown_and_sessionless_bots() {
+        let ts = 1000;
+        let pool = vec![
+            serde_json::json!({"bot_id": "111", "cooldown_until": 2000}), // on cooldown (2000 > 1000)
+            serde_json::json!({"bot_id": "222", "cooldown_until": 0}),    // valid
+            serde_json::json!({"bot_id": "333", "cooldown_until": 0}),    // has no session
+            serde_json::json!({"bot_id": "444", "cooldown_until": 0}),    // valid
+        ];
+        let has_session = |id: &str| id != "333";
+
+        let (first, next1) = filter_and_pick_pool_bot(&pool, ts, has_session, 0).unwrap();
+        assert_eq!(first["bot_id"], "222");
+        assert_eq!(next1, 1);
+
+        let (second, next2) = filter_and_pick_pool_bot(&pool, ts, has_session, next1).unwrap();
+        assert_eq!(second["bot_id"], "444");
+        assert_eq!(next2, 0);
+
+        // Wraps between 222 and 444 only
+        let (third, next3) = filter_and_pick_pool_bot(&pool, ts, has_session, next2).unwrap();
+        assert_eq!(third["bot_id"], "222");
+        assert_eq!(next3, 1);
     }
 
 }

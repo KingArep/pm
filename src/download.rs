@@ -488,6 +488,50 @@ fn record_refusal(
     );
 }
 
+pub fn plan_download_candidates(
+    bot_id: &str,
+    short_code: &str,
+    active_bot: &str,
+    picked_bot_id: Option<&str>,
+    pool_bot_ids: &[String],
+    usable: impl Fn(&str) -> bool,
+) -> (String, Vec<String>) {
+    let bot_bound = !bot_id.is_empty();
+    let mut candidates: Vec<String> = Vec::new();
+    if !bot_bound && !short_code.is_empty() {
+        if let Some(id) = picked_bot_id {
+            if !id.is_empty() {
+                candidates.push(id.to_string());
+            }
+        }
+    }
+    if !active_bot.is_empty() && !candidates.contains(&active_bot.to_string()) && usable(active_bot) {
+        candidates.push(active_bot.to_string());
+    }
+    if !bot_id.is_empty() && !candidates.contains(&bot_id.to_string()) && usable(bot_id) {
+        candidates.push(bot_id.to_string());
+    }
+    // Pool bots are only useful when the payload does not name one; with a
+    // bound bot they would download with a foreign file_id and 410.
+    if !bot_bound {
+        for id in pool_bot_ids {
+            if !id.is_empty() && !candidates.contains(id) && usable(id) {
+                candidates.push(id.clone());
+            }
+        }
+    }
+    if candidates.is_empty() {
+        let fallback = if active_bot.is_empty() { bot_id.to_string() } else { active_bot.to_string() };
+        candidates.push(fallback);
+    }
+    let chosen_bot = if bot_id.is_empty() || !usable(bot_id) {
+        candidates.first().cloned().unwrap_or_default()
+    } else {
+        bot_id.to_string()
+    };
+    (chosen_bot, candidates)
+}
+
 pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
     let started = std::time::Instant::now();
     if !is_authenticated(ctx) {
@@ -588,6 +632,7 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
                     );
                 }
                 file_id = cached_id;
+                bot_id = eff_bot.clone();
                 let fs = entry.get("file_size").and_then(|v| v.as_u64()).unwrap_or(0);
                 if file_size == 0 && fs > 0 {
                     file_size = fs;
@@ -679,38 +724,31 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
     // is exactly what spreads the *resolves* over the pool, and the id it returns
     // is then bound to the bot that will use it.
     let bot_bound = !bot_id.is_empty();
-    let mut candidates: Vec<String> = Vec::new();
-    if !bot_bound && !short_code.is_empty() {
-        if let Some(picked) = pick_pool_bot() {
-            let id = jstr(&picked, "bot_id");
-            if !id.is_empty() {
-                candidates.push(id);
-            }
-        }
-    }
-    if !active_bot.is_empty() && !candidates.contains(&active_bot) && usable(&active_bot) {
-        candidates.push(active_bot.clone());
-    }
-    if !bot_id.is_empty() && !candidates.contains(&bot_id) && usable(&bot_id) {
-        candidates.push(bot_id.clone());
-    }
-    // Pool bots are only useful when the payload does not name one; with a
-    // bound bot they would download with a foreign file_id and 410.
-    if !bot_bound {
-        for b in get_bot_pool() {
-            let id = jstr(&b, "bot_id");
-            if !id.is_empty() && !candidates.contains(&id) && usable(&id) {
-                candidates.push(id);
-            }
-        }
-    }
-    if candidates.is_empty() {
-        let fallback = if active_bot.is_empty() { bot_id.clone() } else { active_bot.clone() };
-        candidates.push(fallback);
-    }
-    if bot_id.is_empty() || !has_local_session(&bot_id) {
-        bot_id = candidates.first().cloned().unwrap_or_default();
-    }
+    let picked = if !bot_bound && !short_code.is_empty() {
+        pick_pool_bot().and_then(|p| {
+            let id = jstr(&p, "bot_id");
+            if id.is_empty() { None } else { Some(id) }
+        })
+    } else {
+        None
+    };
+    let pool_bot_ids: Vec<String> = if !bot_bound {
+        get_bot_pool().iter().filter_map(|b| {
+            let id = jstr(b, "bot_id");
+            if id.is_empty() { None } else { Some(id) }
+        }).collect()
+    } else {
+        Vec::new()
+    };
+    let (chosen_bot, candidates) = plan_download_candidates(
+        &bot_id,
+        &short_code,
+        &active_bot,
+        picked.as_deref(),
+        &pool_bot_ids,
+        &usable,
+    );
+    bot_id = chosen_bot;
 
     if file_id.is_empty() && !short_code.is_empty() {
         let resolved = resolve_shortcode_concurrent(&short_code, &candidates).await;
@@ -1880,5 +1918,41 @@ mod tests {
         // A window well inside the file is untouched.
         assert_eq!(window(0, crate::telegram::MB, REAL_SIZE),
                    Some((0, crate::telegram::MB)));
+    }
+
+    #[test]
+    fn download_candidates_round_robin_unbound_shortcodes() {
+        let usable = |_id: &str| true;
+        let pool = vec!["bot_1".to_string(), "bot_2".to_string(), "bot_3".to_string()];
+
+        // Request 1: short_code provided, bot_id empty (unbound).
+        // pick_pool_bot returns bot_1.
+        let (chosen1, cands1) = plan_download_candidates("", "short1", "bot_active", Some("bot_1"), &pool, usable);
+        assert_eq!(chosen1, "bot_1");
+        assert_eq!(cands1[0], "bot_1");
+
+        // Request 2: next round-robin pick is bot_2.
+        let (chosen2, cands2) = plan_download_candidates("", "short2", "bot_active", Some("bot_2"), &pool, usable);
+        assert_eq!(chosen2, "bot_2");
+        assert_eq!(cands2[0], "bot_2");
+
+        // Request 3: next round-robin pick is bot_3.
+        let (chosen3, cands3) = plan_download_candidates("", "short3", "bot_active", Some("bot_3"), &pool, usable);
+        assert_eq!(chosen3, "bot_3");
+        assert_eq!(cands3[0], "bot_3");
+    }
+
+    #[test]
+    fn download_candidates_preserves_bound_bot() {
+        let usable = |_id: &str| true;
+        let pool = vec!["bot_1".to_string(), "bot_2".to_string(), "bot_3".to_string()];
+
+        // Bound request: bot_id is already fixed to "bot_2" because the payload carries a minted file_id.
+        // Even if pick_pool_bot would suggest "bot_1", it must NOT rotate away from the bound bot.
+        let (chosen, cands) = plan_download_candidates("bot_2", "short1", "bot_active", Some("bot_1"), &pool, usable);
+        assert_eq!(chosen, "bot_2");
+        // Other pool bots are not added to candidates to prevent 410 FILE_REFERENCE_EXPIRED
+        assert!(!cands.contains(&"bot_1".to_string()));
+        assert!(!cands.contains(&"bot_3".to_string()));
     }
 }

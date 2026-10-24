@@ -423,6 +423,18 @@ impl TelegramPool {
             next: AtomicUsize::new(0),
         });
         self.bots.lock().await.insert(key.clone(), entry.clone());
+        if !identity.id.is_empty() && identity.id != key {
+            self.bots.lock().await.insert(identity.id.clone(), entry.clone());
+            let real_dir = session_dir(&identity.id);
+            if !real_dir.exists() && dir.exists() {
+                let _ = fs::create_dir_all(&real_dir);
+                if let Ok(entries) = fs::read_dir(&dir) {
+                    for e in entries.flatten() {
+                        let _ = fs::copy(e.path(), real_dir.join(e.file_name()));
+                    }
+                }
+            }
+        }
         log(
             "telegram session resumed",
             &serde_json::json!({
@@ -743,4 +755,192 @@ async fn fetch_range_once(
 pub async fn fetch_one_chunk(client: &Client, target: &DocTarget, pos: u64, want: u64) -> Result<usize, GramErr> {
     let data = fetch_range(client, target, pos, want).await?;
     Ok(data.len())
+}
+
+#[cfg(test)]
+impl BotEntry {
+    pub fn new_test_entry(bot_id: &str, workers: usize, inflight: usize) -> Self {
+        let dummy_path = std::env::temp_dir().join(format!("pm_test_sess_{}.json", bot_id));
+        let session = Arc::new(JsonSession::load(&dummy_path));
+        let mut clients = Vec::new();
+        for _ in 0..workers {
+            let SenderPool { handle, .. } = SenderPool::new(session.clone(), 12345);
+            clients.push(Client::new(handle));
+        }
+        let gates = (0..workers)
+            .map(|_| Arc::new(tokio::sync::Semaphore::new(inflight)))
+            .collect();
+        Self {
+            identity: BotIdentity {
+                id: bot_id.to_string(),
+                username: format!("{}_bot", bot_id),
+                first_name: format!("Bot {}", bot_id),
+            },
+            clients,
+            gates,
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn available_permits_per_worker(&self) -> Vec<usize> {
+        self.gates.iter().map(|g| g.available_permits()).collect()
+    }
+
+    pub fn total_available_permits(&self) -> usize {
+        self.gates.iter().map(|g| g.available_permits()).sum()
+    }
+}
+
+#[cfg(test)]
+impl TelegramPool {
+    pub async fn insert_test_entry(&self, bot_id: &str, entry: Arc<BotEntry>) {
+        self.bots.lock().await.insert(bot_id.trim().to_string(), entry);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workers_and_inflight_allocated_independently_per_bot() {
+        let workers = 4;
+        let inflight = 8;
+        let pool = TelegramPool::new(workers, inflight);
+        assert_eq!(pool.workers(), 4);
+        assert_eq!(pool.inflight(), 8);
+
+        let bot_a = Arc::new(BotEntry::new_test_entry("bot_111", workers, inflight));
+        let bot_b = Arc::new(BotEntry::new_test_entry("bot_222", workers, inflight));
+
+        assert_eq!(bot_a.client_count(), 4);
+        assert_eq!(bot_b.client_count(), 4);
+
+        // Each bot has 4 worker connections, each with 8 inflight permits (total 32 each).
+        assert_eq!(bot_a.available_permits_per_worker(), vec![8, 8, 8, 8]);
+        assert_eq!(bot_b.available_permits_per_worker(), vec![8, 8, 8, 8]);
+        assert_eq!(bot_a.total_available_permits(), 32);
+        assert_eq!(bot_b.total_available_permits(), 32);
+    }
+
+    #[test]
+    fn pick_slot_cycles_workers_independently() {
+        let workers = 3;
+        let inflight = 5;
+        let bot_a = BotEntry::new_test_entry("bot_a", workers, inflight);
+        let bot_b = BotEntry::new_test_entry("bot_b", workers, inflight);
+
+        // Advance Bot A two times (slots 0, 1)
+        let (_, gate_a0) = bot_a.pick_slot();
+        let (_, gate_a1) = bot_a.pick_slot();
+        assert_eq!(Arc::strong_count(&gate_a0), 2); // 1 in bot_a.gates + 1 returned
+        assert_eq!(Arc::strong_count(&gate_a1), 2);
+
+        // Bot B starts at slot 0 regardless of Bot A's actions
+        assert_eq!(bot_b.pick_index(), 0);
+        assert_eq!(bot_b.pick_index(), 1);
+
+        // Bot A's next slot is 2, then wraps to 0
+        assert_eq!(bot_a.pick_index(), 2);
+        assert_eq!(bot_a.pick_index(), 0);
+    }
+
+    #[tokio::test]
+    async fn bot_a_saturation_does_not_affect_bot_b_inflight() {
+        let workers = 4;
+        let inflight = 8;
+        let pool = TelegramPool::new(workers, inflight);
+
+        let bot_a = Arc::new(BotEntry::new_test_entry("bot_a", workers, inflight));
+        let bot_b = Arc::new(BotEntry::new_test_entry("bot_b", workers, inflight));
+
+        pool.insert_test_entry("bot_a", bot_a.clone()).await;
+        pool.insert_test_entry("bot_b", bot_b.clone()).await;
+
+        // Saturate Bot A completely by acquiring all 32 permits (4 workers * 8 inflight)
+        let mut held_permits_a = Vec::new();
+        for _ in 0..(workers * inflight) {
+            let (_, gate) = bot_a.pick_slot();
+            let permit = gate.try_acquire_owned().expect("Bot A permit should be available");
+            held_permits_a.push(permit);
+        }
+
+        // Verify Bot A is 100% saturated
+        assert_eq!(bot_a.total_available_permits(), 0);
+        assert_eq!(bot_a.available_permits_per_worker(), vec![0, 0, 0, 0]);
+
+        // Attempting to acquire another permit on Bot A must fail immediately
+        let (_, gate_a) = bot_a.pick_slot();
+        assert!(gate_a.try_acquire().is_err());
+
+        // Bot B must be completely unaffected: full 32 permits (8 per worker) remain available!
+        assert_eq!(bot_b.total_available_permits(), 32);
+        assert_eq!(bot_b.available_permits_per_worker(), vec![8, 8, 8, 8]);
+
+        // Bot B can acquire all its permits concurrently
+        let mut held_permits_b = Vec::new();
+        for _ in 0..(workers * inflight) {
+            let (_, gate) = bot_b.pick_slot();
+            let permit = gate.try_acquire_owned().expect("Bot B permit must be independent and available");
+            held_permits_b.push(permit);
+        }
+        assert_eq!(bot_b.total_available_permits(), 0);
+
+        // Release Bot A's permits
+        drop(held_permits_a);
+        assert_eq!(bot_a.total_available_permits(), 32);
+
+        // Bot B remains saturated until its own permits are dropped
+        assert_eq!(bot_b.total_available_permits(), 0);
+        drop(held_permits_b);
+        assert_eq!(bot_b.total_available_permits(), 32);
+    }
+
+    #[tokio::test]
+    async fn concurrent_tasks_across_bots_run_independently() {
+        let workers = 4;
+        let inflight = 8;
+        let bot_a = Arc::new(BotEntry::new_test_entry("bot_1", workers, inflight));
+        let bot_b = Arc::new(BotEntry::new_test_entry("bot_2", workers, inflight));
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(65)); // 32 from bot_a + 32 from bot_b + main coordinator
+
+        let mut handles = Vec::new();
+
+        // Spawn 32 concurrent workers on Bot A
+        for _ in 0..32 {
+            let bot = bot_a.clone();
+            let b = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                let (_, gate) = bot.pick_slot();
+                let _permit = gate.acquire().await.unwrap();
+                b.wait().await;
+            }));
+        }
+
+        // Spawn 32 concurrent workers on Bot B
+        for _ in 0..32 {
+            let bot = bot_b.clone();
+            let b = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                let (_, gate) = bot.pick_slot();
+                let _permit = gate.acquire().await.unwrap();
+                b.wait().await;
+            }));
+        }
+
+        // The barrier will only be satisfied if ALL 64 tasks across BOTH bots
+        // acquired their permits concurrently! If inflight was shared across bots,
+        // it would cap at 32 and deadlock here.
+        tokio::time::timeout(std::time::Duration::from_secs(3), barrier.wait())
+            .await
+            .expect("All 64 tasks across both bots must acquire permits concurrently without deadlock");
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(bot_a.total_available_permits(), 32);
+        assert_eq!(bot_b.total_available_permits(), 32);
+    }
 }

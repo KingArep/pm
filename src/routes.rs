@@ -901,7 +901,7 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
             let hint = if id_part.is_empty() {
                 format!("add_{}", rand_suffix())
             } else {
-                format!("add_{}", id_part)
+                id_part.clone()
             };
             match state.telegram.boot(&hint, Some(&token)).await {
                 Ok(entry) => {
@@ -1233,7 +1233,7 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
             if id.is_empty() {
                 format!("login_{}", rand_suffix())
             } else {
-                format!("login_{}", id)
+                id.clone()
             }
         };
         return match state.telegram.boot(&hint, Some(&token)).await {
