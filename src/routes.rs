@@ -2907,6 +2907,34 @@ async fn build_streams_from_files(
             .cloned()
             .collect();
     }
+    // Exact year beats the ±1 rescue window: a same-name film released a year
+    // apart must not ride along ("Dhoom Dhaam" 2025 serving the 2024 rip). The
+    // window survives only for a title whose files ALL carry an imprecise year,
+    // which is what it was written for. Movies only — the series branch has its
+    // own year rules in `series_file_matches_title()`.
+    if !is_series && !year.trim().is_empty() {
+        let tiers: Vec<crate::matcher::YearTier> = matched
+            .iter()
+            .map(|f| crate::matcher::movie_year_tier(&f.title, &f.caption, year))
+            .collect();
+        let keep = crate::matcher::year_keep_mask(&tiers);
+        let before = matched.len();
+        let mut looked = 0usize;
+        matched.retain(|_| {
+            let keep_this = keep.get(looked).copied().unwrap_or(true);
+            looked += 1;
+            keep_this
+        });
+        if matched.len() != before {
+            log(
+                "stream: dropped adjacent-year files",
+                &serde_json::json!({
+                    "item_id": item_id, "title": title, "year": year,
+                    "dropped": before - matched.len(),
+                }),
+            );
+        }
+    }
 
     if matched.is_empty() {
         log(

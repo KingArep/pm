@@ -1127,6 +1127,91 @@ pub fn series_file_matches_title(
 
 /* ── fd_movie_file_matches_title ───────────────────────────────────────────── */
 
+/// How a file's year evidence compares with the year of the catalog item.
+///
+/// The PHP's ±1 window (backend.php:8923) exists because a rip often carries a
+/// festival or pre-release year. That makes it a *rescue* for an imprecise year,
+/// and [`year_keep_mask()`] treats it as one: `Near` files are dropped as soon
+/// as the title has an `Exact` one, so a same-name film released a year apart
+/// cannot ride along ("Dhoom Dhaam" 2024 next to "Dhoom Dhaam" 2025).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YearTier {
+    /// No year in the file name and no year in the caption — nothing to compare.
+    NoEvidence,
+    /// A year in the file NAME equals the searched year.
+    Exact,
+    /// A year in the file NAME is off by one — the PHP's rescue window.
+    Near,
+    /// Contradictory evidence: the file-name year is more than one year away, or
+    /// the ONLY year is in the CAPTION and it is not exact. A caption is written
+    /// metadata, not a guess the way a file name is, so it gets no ±1 window.
+    Conflict,
+}
+
+fn years_in_text(text: &str) -> Vec<i32> {
+    rx("\\b(19\\d{2}|20\\d{2})\\b")
+        .find_iter(text)
+        .filter_map(|m| m.ok())
+        .filter_map(|m| m.as_str().parse::<i32>().ok())
+        .collect()
+}
+
+/// Classify one file against the searched year (movie branch only — the series
+/// branch keeps its own rules in [`series_file_matches_title()`]).
+///
+/// Mirrors the PHP's year guard in `fd_movie_file_matches_title()`
+/// (backend.php:8910-8931) with one deliberate tightening: when the file name
+/// carries no year the caption is the only evidence, and there it must be
+/// exact.
+pub fn movie_year_tier(file_title: &str, file_caption: &str, searched_year: &str) -> YearTier {
+    let sy = searched_year.trim();
+    if sy.is_empty() {
+        return YearTier::NoEvidence;
+    }
+    // An unparseable year used to fall back to 0, which rejected every dated
+    // file. Keep that: a garbage year must not become a licence to widen.
+    let ty: i32 = match sy.parse::<i32>() {
+        Ok(v) => v,
+        Err(_) => return YearTier::Conflict,
+    };
+    let name_years = years_in_text(file_title);
+    if !name_years.is_empty() {
+        if name_years.contains(&ty) {
+            return YearTier::Exact;
+        }
+        return if name_years.iter().any(|y| (*y - ty).abs() <= 1) {
+            YearTier::Near
+        } else {
+            YearTier::Conflict
+        };
+    }
+    let cap_first = file_caption.lines().next().unwrap_or("").trim();
+    let cap_years = years_in_text(cap_first);
+    if cap_years.is_empty() {
+        return YearTier::NoEvidence;
+    }
+    if cap_years.contains(&ty) {
+        YearTier::Exact
+    } else {
+        YearTier::Conflict
+    }
+}
+
+/// Which candidates survive the year rule, given every candidate's tier.
+///
+/// `Conflict` never survives. `Near` survives only when no `Exact` candidate
+/// exists — that is the whole point of the rescue window: it recovers a title
+/// whose only files carry an imprecise year, and it must never widen an exact
+/// match to also pull in the neighbouring year's release.
+#[must_use]
+pub fn year_keep_mask(tiers: &[YearTier]) -> Vec<bool> {
+    let has_exact = tiers.contains(&YearTier::Exact);
+    tiers
+        .iter()
+        .map(|t| *t != YearTier::Conflict && !(has_exact && *t == YearTier::Near))
+        .collect()
+}
+
 /// Port of `fd_movie_file_matches_title()` (backend.php:8896).
 ///
 /// Rule order is load-bearing: the year guard runs FIRST, then the strict
@@ -1147,28 +1232,17 @@ pub fn movie_file_matches_title(
         return true;
     }
 
-    // 1. Strict year check (the caption disambiguates remakes when the file name
-    // carries no year).
-    let mut year_source = file_title.to_string();
-    if !file_caption.is_empty() && !has("\\b(19\\d{2}|20\\d{2})\\b", file_title) {
-        let cap_first = file_caption.lines().next().unwrap_or("").trim();
-        if !cap_first.is_empty() {
-            year_source = format!("{} {}", file_title, cap_first);
-        }
+    // 1. Strict year check. [`movie_year_tier()`] owns the classification so the
+    // caller can apply the exact-before-±1 policy over the whole file list; here
+    // only a contradiction rejects outright.
+    let year_tier = movie_year_tier(file_title, file_caption, searched_year);
+    if year_tier == YearTier::Conflict {
+        return false;
     }
-    let file_years: Vec<i32> = rx("\\b(19\\d{2}|20\\d{2})\\b")
-        .find_iter(&year_source)
-        .filter_map(|m| m.ok())
-        .filter_map(|m| m.as_str().parse::<i32>().ok())
-        .collect();
-    let has_file_year = !file_years.is_empty();
     let sy = searched_year.trim();
-    if !sy.is_empty() && has_file_year {
-        let ty: i32 = sy.parse().unwrap_or(0);
-        if !file_years.iter().any(|y| (*y - ty).abs() <= 1) {
-            return false;
-        }
-    }
+    // Any year evidence at all: in the file name, or in the caption when the file
+    // name carries none. Section 9's sequence rule requires it.
+    let has_file_year = year_tier != YearTier::NoEvidence;
 
     // 2. Normalised target title.
     let mut clean_target = replace_all("\\s*[•··]\\s*.+$", &decode_html_entities(st), "");
@@ -1966,6 +2040,88 @@ mod tests {
     fn movie_title_words_prefix_match_is_prefix_only() {
         assert!(title_words_prefix_match("Khurafat: Perjanjian Syaitan", "Khurafat"));
         assert!(!title_words_prefix_match("Balan: The Boy", "The Boy"));
+    }
+
+    /* reported leak: same name, adjacent year -------------------------------- */
+
+    // "Dhoom Dhaam" was released twice (2024 and 2025). The 2025 title's `/stream`
+    // list served the 2024 rip because the year guard's ±1 window accepted it. The
+    // window is now a RESCUE that yields to an exact-year file, so the pair can
+    // never land in one list again.
+    #[test]
+    fn movie_rejects_the_adjacent_year_release() {
+        let tiers = vec![
+            movie_year_tier("Dhoom.Dhaam.2024.1080p.WEB-DL.x264.mkv", "", "2025"),
+            movie_year_tier("Dhoom.Dhaam.2025.1080p.WEB-DL.x264.mkv", "", "2025"),
+        ];
+        assert_eq!(tiers, vec![YearTier::Near, YearTier::Exact]);
+        assert_eq!(
+            year_keep_mask(&tiers),
+            vec![false, true],
+            "LEAK: the 2024 rip survived next to the 2025 rip"
+        );
+
+        // Mirror image: the 2024 title must not serve the 2025 rip either.
+        let tiers = vec![
+            movie_year_tier("Dhoom.Dhaam.2025.1080p.WEB-DL.x264.mkv", "", "2024"),
+            movie_year_tier("Dhoom.Dhaam.2024.1080p.WEB-DL.x264.mkv", "", "2024"),
+        ];
+        assert_eq!(tiers, vec![YearTier::Near, YearTier::Exact]);
+        assert_eq!(year_keep_mask(&tiers), vec![false, true]);
+    }
+
+    #[test]
+    fn movie_year_tier_separates_exact_near_and_conflict() {
+        let file = "Dhoom.Dhaam.2024.1080p.WEB-DL.x264.mkv";
+        assert_eq!(movie_year_tier(file, "", "2024"), YearTier::Exact);
+        assert_eq!(movie_year_tier(file, "", "2025"), YearTier::Near);
+        assert_eq!(movie_year_tier(file, "", "2023"), YearTier::Near);
+        // Two years away is a contradiction, and stays a hard reject.
+        assert_eq!(movie_year_tier(file, "", "2022"), YearTier::Conflict);
+        assert!(!movie_file_matches_title(file, "Dhoom Dhaam", "2022", "", ""));
+        // A file with no year anywhere has nothing to contradict.
+        assert_eq!(
+            movie_year_tier("Dhoom.Dhaam.1080p.mkv", "", "2025"),
+            YearTier::NoEvidence
+        );
+        // An unknown searched year never gates.
+        assert_eq!(movie_year_tier(file, "", ""), YearTier::NoEvidence);
+    }
+
+    // The control: a title whose only files carry an imprecise year still gets
+    // them, or a "fix" that simply rejects everything would look green.
+    #[test]
+    fn movie_keeps_the_rescue_when_no_exact_year_exists() {
+        let file = "Dhoom.Dhaam.2024.1080p.WEB-DL.x264.mkv";
+        assert_eq!(movie_year_tier(file, "", "2025"), YearTier::Near);
+        assert_eq!(year_keep_mask(&[YearTier::Near]), vec![true]);
+        assert!(movie_file_matches_title(file, "Dhoom Dhaam", "2025", "", ""));
+        // ... and the correctly-yeared file always matches.
+        assert!(movie_file_matches_title(
+            "Dhoom.Dhaam.2025.1080p.WEB-DL.x264.mkv",
+            "Dhoom Dhaam",
+            "2025",
+            "",
+            ""
+        ));
+    }
+
+    // A rip that omits the year from its file name carries it in the caption. The
+    // caption is then the ONLY year evidence, and for a MOVIE it must be exact —
+    // no ±1 window, because a caption is written metadata, not a guess. The
+    // series branch keeps its own rules and is deliberately untouched.
+    #[test]
+    fn movie_caption_year_vetoes_an_unyeared_filename() {
+        let file = "Dhoom.Dhaam.1080p.WEB-DL.x264.mkv";
+        let caption = "Dhoom Dhaam (2024) 1080p WEB-DL\nTelegram rip";
+        assert_eq!(movie_year_tier(file, caption, "2024"), YearTier::Exact);
+        assert_eq!(movie_year_tier(file, caption, "2025"), YearTier::Conflict);
+        assert_eq!(movie_year_tier(file, caption, "2023"), YearTier::Conflict);
+        assert!(
+            !movie_file_matches_title(file, "Dhoom Dhaam", "2025", caption, ""),
+            "LEAK: an unyeared file name with a 2024 caption joined the 2025 title"
+        );
+        assert!(movie_file_matches_title(file, "Dhoom Dhaam", "2024", caption, ""));
     }
 
     /* trap 1: a year EMBEDDED in a series name ------------------------------- */
