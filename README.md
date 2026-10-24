@@ -22,7 +22,7 @@
 
 **PencariMovie Server** is a lightweight, self-hosted streaming utility and protocol bridge connecting client applications to Telegram's MTProto API. It converts user-authorized Telegram file references into local HTTP streams with range-request (`HTTP 206`) seek support for media players including **Stremio**, **Nuvio**, and web browsers.
 
-- **Client-Side MTProto Bridge**: Directly streams authorized media to the user's local player over MTProto ([`grammers`](https://codeberg.org/grammers/grammers), compiled into the binary).
+- **Client-Side MTProto Bridge**: Directly streams authorized media to the user's local player over MTProto ([`grammers`](https://codeberg.org/Lonami/grammers), compiled into the binary).
 - **No Remote File Hosting**: The server does not host, store, or re-transmit copyrighted files; streams originate from Telegram's network directly to the local client.
 - **Local & Private**: Runs on the user's own hardware (localhost / private LAN) without passing credentials or media bytes to external proxy servers.
 - **Cross-Platform**: Available as a native Windows tray application, Linux daemon, Android APK, Termux script, and Docker container.
@@ -328,7 +328,7 @@ If you are a copyright owner, content producer, or legal representative wishing 
 Built on the shoulders of these fantastic open-source projects:
 
 - [**Rust**](https://www.rust-lang.org/) — The engine and its single-binary build.
-- [**grammers**](https://codeberg.org/grammers/grammers) — Telegram MTProto client library.
+- [**grammers**](https://codeberg.org/Lonami/grammers) — Telegram MTProto client library.
 - [**axum**](https://github.com/tokio-rs/axum) — HTTP server and router.
 - [**cloudflared**](https://github.com/cloudflare/cloudflared) — Cloudflare tunnel client enabling seamless TryCloudflare quick tunnels.
 
