@@ -501,7 +501,21 @@ pub async fn lookup_imdb_by_title(title: &str, year: &str) -> String {
 }
 
 /// `GET {WP_API_BASE}/lookup-id?prefix=…&id=…` — the local `media_ids_idx` row.
+///
+/// Cached, INCLUDING the miss. This sits on the critical path of every external
+/// `/stream` request (it is what could give the route a `post_id`, i.e. an exact
+/// post file set instead of a title scan), it is a pure index read, and the
+/// origin answers 404 for most of the ids that reach it — measured on a real
+/// box: `mal:54492` 404, `tt:0944947` 404. Un-cached, every episode of a series
+/// paid that round-trip (83-350 ms) for an answer that had not changed.
+///
+/// 15 min: long enough to make an episode list free, short enough that a freshly
+/// indexed id is not invisible for a browsing session.
 pub async fn lookup_id(prefix: &str, id: &str) -> Value {
+    let key = format!("{}:{}", prefix, id);
+    if let Some(hit) = crate::cache::get("lookup_id", &key) {
+        return (*hit).clone();
+    }
     let url = query_add(
         rest_route("lookup_id"),
         &[
@@ -509,7 +523,9 @@ pub async fn lookup_id(prefix: &str, id: &str) -> Value {
             ("id".to_string(), id.to_string()),
         ],
     );
-    unwrap_data(&httpc::http_json(&url, &[], "GET", 8).await)
+    let v = unwrap_data(&httpc::http_json(&url, &[], "GET", 8).await);
+    crate::cache::put("lookup_id", &key, &v, 900, 0);
+    v
 }
 
 /// `GET {WP_API_BASE}/stream-files?type=…&title=…&year=…&id=…`.

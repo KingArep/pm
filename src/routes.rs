@@ -2630,9 +2630,24 @@ async fn handle_external_stream(
         // (1) ID-ONLY ORIGIN PROBE. `/stream-files` resolves the identity from
         // `id` itself and answers `resolved_title`, so an id that is not in the
         // local `media_ids_idx` can still be recovered in ONE origin call.
+        //
+        // Two measured rules decide whether to spend that call (it is on the
+        // critical path of every episode, before any file can be listed):
+        //
+        // * the origin resolves `tt…` / `tmdb:…` by id, and answers
+        //   `{"ok":0,"error":"title or id required"}` — an HTTP 400 — for a
+        //   `mal:`/`kitsu:`/`anilist:`/`tvdb:`/`tvmaze:` id, so for those the
+        //   call can only ever return zero files;
+        // * the id must be BARE. `id=tt0944947` answers 499 files, while the
+        //   item id carries the `:S:E` suffix and `id=mal:54492:1:12` was
+        //   rejected outright — the season/episode is not part of an origin id.
         let kind = if item_type == "series" || season > 0 { "series" } else { "movie" };
-        let (by_id_title, by_id_year, by_id_files) =
-            crate::wp_data::stream_files_by_title(kind, "", "", item_id).await;
+        let (by_id_title, by_id_year, by_id_files) = if origin_resolves_by_id(prefix) {
+            let bare_id = origin_probe_id(prefix, &value);
+            crate::wp_data::stream_files_by_title(kind, "", "", &bare_id).await
+        } else {
+            (String::new(), String::new(), Vec::new())
+        };
         if !by_id_files.is_empty() {
             let t = if by_id_title.is_empty() {
                 item_id.to_string()
@@ -2803,6 +2818,28 @@ async fn handle_external_stream(
 /// list instead of only the meta bridge — which previously opened the item and
 /// then answered the empty card, because `handle_external_stream()` returned
 /// `None` and the route fell through to the upstream-only branch.
+/// Can the ORIGIN resolve this prefix from an id alone?
+///
+/// Measured against the live origin: `id=tt0944947` answers 499 files with a
+/// `resolved_title`, while `id=mal:54492` and `id=mal:54492:1:12` both answer
+/// HTTP 400 `{"ok":0,"error":"title or id required"}`. Asking anyway spent a
+/// round-trip on the critical path of every `mal:` / `kitsu:` / `anilist:`
+/// episode, before any file could be listed.
+fn origin_resolves_by_id(prefix: &str) -> bool {
+    prefix == "tt" || prefix == "tmdb"
+}
+
+/// The id an origin probe may send: BARE. Never the item id — it carries the
+/// `:S:E` suffix, which the origin rejects outright — and `tt` concatenates
+/// (`tt0944947`) while every other prefix keeps its colon (`tmdb:123`).
+fn origin_probe_id(prefix: &str, value: &str) -> String {
+    if prefix == "tt" {
+        format!("tt{}", value)
+    } else {
+        format!("{}:{}", prefix, value)
+    }
+}
+
 fn parse_external_id(item_id: &str) -> Option<(&'static str, String, i32, i32)> {
     let id = item_id.trim();
     if let Some(rest) = id.strip_prefix("tt") {
@@ -7743,6 +7780,23 @@ mod tests {
         assert!(notes.iter().any(|n| n.contains("tag off: dv")), "{notes:?}");
         // Shipped defaults restrict nothing, so the card keeps the generic text.
         assert!(active_filter_notes(&default_catalog_settings()["stream_config"]).is_empty());
+    }
+
+    /// An origin probe must send a BARE id, and only when the origin can resolve
+    /// that prefix from an id at all (live measurements in [`origin_resolves_by_id`]).
+    #[test]
+    fn an_origin_probe_uses_a_bare_id_and_only_for_resolvable_prefixes() {
+        assert_eq!(origin_probe_id("mal", "54492"), "mal:54492");
+        assert_eq!(origin_probe_id("tt", "0944947"), "tt0944947");
+        assert_eq!(origin_probe_id("tmdb", "1399"), "tmdb:1399");
+        assert!(origin_resolves_by_id("tt"));
+        assert!(origin_resolves_by_id("tmdb"));
+        for prefix in ["mal", "kitsu", "anilist", "tvdb", "tvmaze"] {
+            assert!(
+                !origin_resolves_by_id(prefix),
+                "{prefix} answers 400 `title or id required` on the origin"
+            );
+        }
     }
 
     #[test]
