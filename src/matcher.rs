@@ -437,7 +437,10 @@ pub fn extract_media_tags(title: &str, caption: &str) -> MediaTags {
         &[
             ("(?i)\\b(remux)\\b", "REMUX"),
             ("(?i)\\b(bluray|blu-ray|bdrip|bbrip|brrip)\\b", "BluRay"),
-            ("(?i)\\b(web-?dl)\\b", "WEB-DL"),
+            // `WEB.DL` (every scene name separates tags with dots) and `WEBDL` are
+            // the same source as `WEB-DL`. Without the dot/underscore forms the
+            // `web` rule below caught them and the pill said WEBRip.
+            ("(?i)\\bweb[._-]?dl\\b", "WEB-DL"),
             ("(?i)\\b(webrip|web)\\b", "WEBRip"),
             ("(?i)\\b(hdrip)\\b", "HDRip"),
             ("(?i)\\b(hdtv|tvrip|pdtv)\\b", "HDTV"),
@@ -513,6 +516,11 @@ pub fn extract_media_tags(title: &str, caption: &str) -> MediaTags {
             ("(?i)\\b(remastered)\\b", "Remastered"),
             ("(?i)\\b(extended)\\b", "Extended"),
             ("(?i)\\b(uncut)\\b", "Uncut"),
+            // `UNRATED` is an edition, not noise: it is how a viewer tells the
+            // theatrical cut from the unrated one. It was silently dropped, so
+            // `Obsession.2026.2160p.iT.WEB.DL.UNRATED.DV.HDR10…` showed neither
+            // the pill nor the distinction.
+            ("(?i)\\b(unrated|unrated\\s+cut)\\b", "Unrated"),
             ("(?i)\\b(repack|proper)\\b", "Proper"),
         ],
         "",
@@ -2538,6 +2546,67 @@ mod tests {
         files[0].is_split_part = true;
         let kept = apply_stream_filters(&files, &cfg);
         assert!(kept.is_empty(), "exclude_part_title defaults to ON");
+    }
+
+    /* web.dl / webdl are WEB-DL, not WEBRip ---------------------------------- */
+
+    #[test]
+    fn web_dl_survives_every_scene_separator() {
+        // `Obsession.2026.2160p.iT.WEB.DL.UNRATED.DV.HDR10.MULTiBen.The.Men.mp4`
+        // is a WEB-DL release, but the pattern only accepted `web-dl`, so `WEB.DL`
+        // fell through to the `web` rule and the pill said WEBRip — the wrong
+        // source on screen AND 50M instead of 60M in `stream_sort_score`.
+        for name in [
+            "Obsession.2026.2160p.iT.WEB.DL.UNRATED.DV.HDR10.MULTiBen.The.Men.mp4",
+            "Obsession.2026.2160p.iT.WEB-DL.DV.HDR.mp4",
+            "Obsession.2026.2160p.iT.WEBDL.DV.HDR.mp4",
+            "Obsession.2026.2160p.iT.WEB_DL.DV.HDR.mp4",
+        ] {
+            assert_eq!(extract_media_tags(name, "").source, "WEB-DL", "{name}");
+        }
+        // A genuine WEBRip must stay a WEBRip, and the bare `web` fallback too.
+        assert_eq!(
+            extract_media_tags("Obsession.2026.1080p.WEBRip.x264.mp4", "").source,
+            "WEBRip"
+        );
+        assert_eq!(
+            extract_media_tags("Obsession.2026.1080p.WEB.x264.mp4", "").source,
+            "WEBRip"
+        );
+    }
+
+    #[test]
+    fn duration_flags_the_four_obsession_multiben_chunks() {
+        // Real numbers from `/api/resolve-shortcode` (2026-10-25):
+        //   rUaIMd 1185 s / 4.19 GB   ySYWSG 1162 s / 4.18 GB
+        //   28YMMS 1167 s / 4.18 GB   2p1Acd  710 s / 2.49 GB
+        // Four files, one name, 4224 s (70.4 min) together, no `part` in the name.
+        let name = "Obsession.2026.2160p.iT.WEB.DL.UNRATED.DV.HDR10.MULTiBen.The.Men.mp4";
+        let mut files: Vec<FileItem> = [1185u32, 1167, 1162, 710]
+            .iter()
+            .map(|d| FileItem {
+                title: name.to_string(),
+                duration: *d,
+                ..Default::default()
+            })
+            .collect();
+        detect_parts_by_duration(&mut files);
+        assert!(files.iter().all(|f| f.is_split_part), "all four must be flagged");
+        assert!(files.iter().all(|f| f.total_parts == 4));
+    }
+
+    #[test]
+    fn unrated_is_an_edition() {
+        let name = "Obsession.2026.2160p.iT.WEB.DL.UNRATED.DV.HDR10.MULTiBen.The.Men.mp4";
+        let tags = extract_media_tags(name, "");
+        assert_eq!(tags.edition, "Unrated");
+        // The rest of that name, as measured: 4K / DV+HDR10 / no codec or audio
+        // token in the name at all (`iT` is iTunes, `MULTi` is multi-audio — both
+        // are NOT in the tag tables and must not be guessed).
+        assert_eq!(tags.resolution, "4K");
+        assert_eq!(tags.visual, vec!["HDR".to_string(), "DV".to_string()]);
+        assert_eq!(tags.codec, "");
+        assert_eq!(tags.audio, "");
     }
 
     /* duration-based part detection ------------------------------------------ */
