@@ -1346,7 +1346,11 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
             let id = id_part.strip_suffix(".json").map(|s| s.to_string());
             if let Some(id) = id {
                 if !is_authenticated(&ctx) {
-                    return stremio_locked_stream(&ctx.base_url);
+                    // The sponsored item still goes on top: the user is being
+                    // told to re-install, which is exactly when they should see
+                    // it. Never cached — a locked answer must not outlive the
+                    // token/URL it was produced for.
+                    return stremio_locked_stream(&ctx.base_url, sponsor_item().await);
                 }
                 let decoded_id = crate::download::percent_decode(&id);
                 return handle_stream(&state, &ctx, type_part, &decoded_id).await;
@@ -1727,12 +1731,19 @@ async fn handle_stream(state: &Arc<AppState>, ctx: &ReqCtx, item_type: &str, ite
     // list costs one hash lookup. `finish_streams()` fills it.
     let skey = stream_cache_key(item_type, item_id, &ctx.base_url);
     if let Some(hit) = crate::cache::get("stream", &skey) {
-        if hit.get("streams").map(|s| s.is_array()).unwrap_or(false) {
+        if let Some(list) = hit.get("streams").and_then(|s| s.as_array()) {
             log(
                 "stremio stream served from cache",
                 &serde_json::json!({"type": item_type, "id": item_id}),
             );
-            return stremio_json(200, &hit, "no-store");
+            // The cached body is the LIST only; the sponsor is re-fetched per
+            // answer, so a warm list can never serve a missing sponsor.
+            let below = hit
+                .get("had_streams")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let streams = decorate_streams(&ctx.base_url, list.clone(), below).await;
+            return stremio_json(200, &serde_json::json!({"streams": streams}), "no-store");
         }
     }
 
@@ -1756,20 +1767,18 @@ async fn handle_stream(state: &Arc<AppState>, ctx: &ReqCtx, item_type: &str, ite
                 "stream blocked: clock skew",
                 &serde_json::json!({"offset_seconds": clock.offset}),
             );
-            return stremio_json(
-                200,
-                &serde_json::json!({
-                    "streams": [{
-                        "name": "PencariMovie",
-                        "description": format!(
-                            "{}\nTap to open PencariMovie and re-check the clock, then retry.",
-                            clock_skew_message(clock.offset)
-                        ),
-                        "externalUrl": format!("{}/#settings", base),
-                    }]
+            return single_card_streams(
+                &ctx.base_url,
+                serde_json::json!({
+                    "name": "PencariMovie",
+                    "description": format!(
+                        "{}\nTap to open PencariMovie and re-check the clock, then retry.",
+                        clock_skew_message(clock.offset)
+                    ),
+                    "externalUrl": format!("{}/#settings", base),
                 }),
-                "no-store",
-            );
+            )
+            .await;
         }
         let already = is_guest_provision_in_progress();
         if !already {
@@ -1782,25 +1791,23 @@ async fn handle_stream(state: &Arc<AppState>, ctx: &ReqCtx, item_type: &str, ite
             "stream blocked: provisioning guest bot",
             &serde_json::json!({"already_running": already, "type": item_type, "id": item_id}),
         );
-        return stremio_json(
-            200,
-            &serde_json::json!({
-                "streams": [{
-                    "name": "PencariMovie",
-                    "description": format!(
-                        "{}\n⏳ {} a guest Telegram bot — this takes a few seconds. Reopen this title in a moment.",
-                        if already {
-                            "Telegram bot not connected yet."
-                        } else {
-                            "Telegram bot not connected."
-                        },
-                        if already { "Still provisioning" } else { "Provisioning" }
-                    ),
-                    "externalUrl": format!("{}/#settings", base),
-                }]
+        return single_card_streams(
+            &ctx.base_url,
+            serde_json::json!({
+                "name": "PencariMovie",
+                "description": format!(
+                    "{}\n⏳ {} a guest Telegram bot — this takes a few seconds. Reopen this title in a moment.",
+                    if already {
+                        "Telegram bot not connected yet."
+                    } else {
+                        "Telegram bot not connected."
+                    },
+                    if already { "Still provisioning" } else { "Provisioning" }
+                ),
+                "externalUrl": format!("{}/#settings", base),
             }),
-            "no-store",
-        );
+        )
+        .await;
     }
 
     let is_direct = item_id.starts_with("pm_file_") || item_id.starts_with("pm:file:");
@@ -1821,16 +1828,14 @@ async fn handle_stream(state: &Arc<AppState>, ctx: &ReqCtx, item_type: &str, ite
         };
         if file_id.is_empty() {
             let msg = jstr(&resolved, "message");
-            return stremio_json(
-                200,
-                &serde_json::json!({
-                    "streams": [{
-                        "name": "PencariMovie",
-                        "description": format!("File could not be resolved.\n{}", msg),
-                    }]
+            return single_card_streams(
+                &ctx.base_url,
+                serde_json::json!({
+                    "name": "PencariMovie",
+                    "description": format!("File could not be resolved.\n{}", msg),
                 }),
-                "no-cache",
-            );
+            )
+            .await;
         }
         let size = resolved.get("file_size").and_then(|v| v.as_u64()).unwrap_or(0);
         let title = {
@@ -1945,7 +1950,11 @@ async fn handle_stream(state: &Arc<AppState>, ctx: &ReqCtx, item_type: &str, ite
         item_id,
         serde_json::json!({"item_type": item_type, "runtime": "pencarimovie-server"}),
     );
-    stremio_json(200, &serde_json::json!({"streams": []}), "no-store")
+    // An empty array is not a stream list: the user gets the tappable
+    // "No Streams Found" card, and — like every other answer — the sponsor above
+    // it. It used to be a bare `{"streams":[]}`, the one shape in the whole route
+    // with no sponsored item at all.
+    finish_streams(ctx, item_type, item_id, item_id, Vec::new(), false, 0).await
 }
 
 /// Upstream stream-list task (`fd_http_get_many_amp` over the upstream
@@ -2054,7 +2063,7 @@ async fn handle_post_stream(
     let season: i32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let episode: i32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     if post_id.is_empty() || !post_id.chars().all(|c| c.is_ascii_digit()) {
-        return stremio_json(200, &serde_json::json!({"streams": []}), "no-store");
+        return finish_streams(ctx, item_type, item_id, item_id, Vec::new(), false, 0).await;
     }
     let is_series = item_type.contains("series") || season > 0 || episode > 0;
     let (eff_season, eff_episode) = effective_season_episode(is_series, season, episode);
@@ -3231,8 +3240,59 @@ const STREAM_CACHE_TTL: i64 = 300;
 /// The TYPE is part of the key: `tt123` is a different request as a movie and as a
 /// series root. The base url is too, because every download url in the payload is
 /// absolute (`http://192.168.1.5:8088/api/download/...`).
+///
+/// The `v2` prefix retires the entries written when the sponsor was baked into
+/// the cached body: those cannot be distinguished from a body cached during a
+/// WordPress outage (the exact intermittent "sponsor missing" symptom), so they
+/// are ignored rather than upgraded. L2 keeps them only until they expire.
 fn stream_cache_key(item_type: &str, item_id: &str, base_url: &str) -> String {
-    format!("{}|{}|{}", item_type, item_id, base_url)
+    format!("v2|{}|{}|{}", item_type, item_id, base_url)
+}
+
+/// Place the per-answer rows above a finished stream list.
+///
+/// The sponsored item is ALWAYS [0], the WordPress minimum-version notice sits
+/// between it and the media rows, and everything else keeps its order. ONE
+/// function for every `/stream/*` answer — a real list, an empty list, a single
+/// "no session yet" / "file could not be resolved" card, and the locked
+/// "Addon URL changed or password required" card. Before this, only
+/// [`finish_streams()`] inserted the sponsor, so every answer that built its own
+/// array lost it (reported as "the sponsored message is not always on top" and
+/// "when the URL changed / password message appears the sponsored message is
+/// gone").
+fn with_top_items(
+    mut streams: Vec<Value>,
+    notice: Option<Value>,
+    sponsor: Option<Value>,
+) -> Vec<Value> {
+    if let Some(notice) = notice {
+        streams.insert(0, notice);
+    }
+    if let Some(sponsor) = sponsor {
+        streams.insert(0, sponsor);
+    }
+    streams
+}
+
+/// Fetch the per-answer rows (update notice, sponsor) and place them above
+/// `streams` with [`with_top_items()`].
+///
+/// Both come from their own caches (300 s / 600 s), so this is a map lookup on
+/// the hot path; neither is ever stored in the `/stream` response cache.
+async fn decorate_streams(base_url: &str, streams: Vec<Value>, streams_below: bool) -> Vec<Value> {
+    // The WordPress minimum-version notice as a NON-BLOCKING item: the PHP
+    // returned this card INSTEAD of the streams, which made an outdated engine
+    // unusable. Placed below the sponsor item (if any), above media streams.
+    let notice = update_notice(streams_below, base_url).await;
+    let sponsor = sponsor_item().await;
+    with_top_items(streams, notice, sponsor)
+}
+
+/// A stream answer whose list is ONE card (no Telegram session yet, a file that
+/// could not be resolved, ...): the card keeps its place BELOW the sponsor.
+async fn single_card_streams(base_url: &str, card: Value) -> Response {
+    let streams = decorate_streams(base_url, vec![card], false).await;
+    stremio_json(200, &serde_json::json!({"streams": streams}), "no-store")
 }
 
 async fn finish_streams(
@@ -3250,24 +3310,21 @@ async fn finish_streams(
     if streams.is_empty() {
         streams.push(no_streams_card(ctx, title, item_id, filtered, files_before_filter));
     }
-    // The WordPress minimum-version notice as a NON-BLOCKING item: the PHP
-    // returned this card INSTEAD of the streams, which made an outdated engine
-    // unusable. Placed below the sponsor item (if any), above media streams.
-    if let Some(card) = update_notice(had_streams, &ctx.base_url).await {
-        streams.insert(0, card);
-    }
-    if let Some(sponsor) = sponsor_item().await {
-        streams.insert(0, sponsor);
-    }
-    let body = serde_json::json!({"streams": streams});
+    // The cache holds the LIST ONLY. Baking the sponsor (and the update notice)
+    // into the cached body meant one failed WordPress call hid the sponsor from
+    // every client for the next [`STREAM_CACHE_TTL`] seconds, and froze an
+    // "update available" card long after the update — both intermittent
+    // "the sponsor is not on top" reports. `had_streams` travels with the list so
+    // a cache HIT can still word the update notice correctly.
     crate::cache::put(
         "stream",
         &stream_cache_key(item_type, item_id, &ctx.base_url),
-        &body,
+        &serde_json::json!({"streams": &streams, "had_streams": had_streams}),
         STREAM_CACHE_TTL,
         0,
     );
-    stremio_json(200, &body, "no-store")
+    let streams = decorate_streams(&ctx.base_url, streams, had_streams).await;
+    stremio_json(200, &serde_json::json!({"streams": streams}), "no-store")
 }
 
 /// Build the "update available" item from a `/api/update/check` answer
@@ -7779,15 +7836,42 @@ mod tests {
             serde_json::json!("https://github.com/aiskendi/pencarimovie-server/releases/download/apk-server-latest/pencarimovie-server_arm64-v8a.apk")
         );
 
-        // Placement order: inserting update notice then sponsor results in sponsor at [0] and update at [1]
-        let mut streams = vec![serde_json::json!({"name": "Movie.1080p.mkv"})];
-        let card = desktop_feed;
+        // Placement: sponsor at [0], update notice at [1], then the media rows.
+        // This is `with_top_items()`, the ONE placement every `/stream` answer
+        // goes through (real list, empty list, single card, locked addon).
+        let placed = with_top_items(
+            vec![serde_json::json!({"name": "Movie.1080p.mkv"})],
+            Some(desktop_feed),
+            Some(serde_json::json!({"name": "⭐️ Sponsored message"})),
+        );
+        assert_eq!(placed[0]["name"], "⭐️ Sponsored message");
+        assert_eq!(placed[1]["name"], "⬆️ Update available");
+        assert_eq!(placed[2]["name"], "Movie.1080p.mkv");
+    }
+
+    /// The sponsor is [0] even when the list below it is a single card — the
+    /// locked "Addon URL changed or password required" answer, "No Streams
+    /// Found", "File could not be resolved". This is the bug report: "the
+    /// sponsored message is not always on top" / "when the URL changed or
+    /// password message appears the sponsored message is gone".
+    #[test]
+    fn sponsor_is_first_above_a_single_card_and_an_empty_list() {
         let sponsor = serde_json::json!({"name": "⭐️ Sponsored message"});
-        streams.insert(0, card);
-        streams.insert(0, sponsor);
-        assert_eq!(streams[0]["name"], "⭐️ Sponsored message");
-        assert_eq!(streams[1]["name"], "⬆️ Update available");
-        assert_eq!(streams[2]["name"], "Movie.1080p.mkv");
+        let card = serde_json::json!({"name": "PencariMovie", "description": "locked"});
+
+        let one = with_top_items(vec![card.clone()], None, Some(sponsor.clone()));
+        assert_eq!(one.len(), 2);
+        assert_eq!(one[0]["name"], "⭐️ Sponsored message");
+        assert_eq!(one[1]["description"], "locked");
+
+        let none = with_top_items(Vec::new(), None, Some(sponsor));
+        assert_eq!(none.len(), 1);
+        assert_eq!(none[0]["name"], "⭐️ Sponsored message");
+
+        // Nothing configured, nothing invented: the list is untouched.
+        let bare = with_top_items(vec![card], None, None);
+        assert_eq!(bare.len(), 1);
+        assert_eq!(bare[0]["description"], "locked");
     }
 
     #[test]

@@ -150,16 +150,30 @@ pub fn not_found_json() -> Response {
 }
 
 /// PHP `fd_stremio_locked_stream()` (backend.php:1793). Never a 401.
-pub fn stremio_locked_stream(base_url: &str) -> Response {
+///
+/// The sponsored item goes on TOP here too. The PHP answered this card alone, so
+/// an addon whose URL changed (a new tunnel, a rotated token, a required
+/// password) lost the sponsor exactly when the user was being asked to
+/// re-install — reported as "when the URL changed / password message appears the
+/// sponsored message is gone". `sponsor` is passed in rather than fetched so the
+/// body stays a pure function of its inputs; the caller owns the WordPress lookup.
+pub fn locked_stream_body(base_url: &str, sponsor: Option<serde_json::Value>) -> serde_json::Value {
+    let mut streams: Vec<serde_json::Value> = Vec::with_capacity(2);
+    if let Some(sponsor) = sponsor {
+        streams.push(sponsor);
+    }
+    streams.push(serde_json::json!({
+        "name": "PencariMovie",
+        "description": "Addon URL changed or password required.\nOpen PencariMovie and re-install the addon from #addon.",
+        "externalUrl": format!("{}/#addon", rtrim(base_url))
+    }));
+    serde_json::json!({ "streams": streams })
+}
+
+pub fn stremio_locked_stream(base_url: &str, sponsor: Option<serde_json::Value>) -> Response {
     stremio_json(
         200,
-        &serde_json::json!({
-            "streams": [{
-                "name": "PencariMovie",
-                "description": "Addon URL changed or password required.\nOpen PencariMovie and re-install the addon from #addon.",
-                "externalUrl": format!("{}/#addon", rtrim(base_url))
-            }]
-        }),
+        &locked_stream_body(base_url, sponsor),
         "no-cache, no-store, must-revalidate",
     )
 }
@@ -178,4 +192,42 @@ pub fn eclipse_locked_response(base_url: &str) -> Response {
 
 pub fn rtrim(s: &str) -> String {
     s.trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "When the URL changed / password message appears the sponsored message is
+    /// gone" — the locked answer must carry the sponsor ABOVE the re-install card,
+    /// not replace the list with it.
+    #[test]
+    fn locked_stream_keeps_the_sponsor_on_top() {
+        let sponsor = serde_json::json!({
+            "name": "📢 Help us index more content!",
+            "description": "send files to the bot",
+            "externalUrl": "https://t.me/Y_Flixbot",
+        });
+        let body = locked_stream_body("http://127.0.0.1:8088/", Some(sponsor));
+        let streams = body["streams"].as_array().expect("streams array");
+        assert_eq!(streams.len(), 2, "{body}");
+        assert_eq!(streams[0]["externalUrl"], "https://t.me/Y_Flixbot");
+        assert_eq!(streams[1]["name"], "PencariMovie");
+        assert!(streams[1]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Addon URL changed or password required"));
+        assert_eq!(streams[1]["externalUrl"], "http://127.0.0.1:8088/#addon");
+    }
+
+    /// No sponsor configured: the answer is exactly the one card the PHP sent, so
+    /// the parity shape is not lost when WordPress has nothing to advertise.
+    #[test]
+    fn locked_stream_without_sponsor_is_the_single_card() {
+        let body = locked_stream_body("http://127.0.0.1:8088", None);
+        let streams = body["streams"].as_array().expect("streams array");
+        assert_eq!(streams.len(), 1, "{body}");
+        assert_eq!(streams[0]["name"], "PencariMovie");
+        assert_eq!(streams[0]["externalUrl"], "http://127.0.0.1:8088/#addon");
+    }
 }

@@ -6,6 +6,23 @@ All notable changes to the PencariMovie Server / Downloader project will be docu
 
 ### Fixed
 
+- **The sponsored item is now `streams[0]` on EVERY `/stream/*` answer.** Only
+  [`finish_streams()`](src/routes.rs:1) used to prepend it, so every answer that
+  built its own array lost it:
+  - the locked card (`fd_stremio_locked_stream`) — reported as "when the URL
+    changed / password message shows, the sponsored message is gone";
+  - the no-session cards (clock skew, guest-bot provisioning), "File could not be
+    resolved", a malformed `pm:post:` id and the unsupported-id shape (which used
+    to answer a bare `{"streams":[]}` — the one answer with no sponsor at all).
+
+  All of them now go through one placement function,
+  [`with_top_items()`](src/routes.rs:1): sponsor, then the update notice, then the
+  rows. `sponsor` was also moved OUT of the 300 s `/stream` response cache — baking
+  it in meant a single failed WordPress call hid the sponsor from every client for
+  five minutes (the "not always on top" report), and froze an "update available"
+  card long after the update. The cache key is now `v2|…` so pre-change entries
+  cannot be served. `scripts/probe_sponsor_top.mjs` pins all of it over HTTP.
+
 - **The system tray is now part of the binary, and the icon actually shows.** The
   tray was a separate `powershell.exe` process running `tray.ps1`. Windows stores
   the per-app tray settings in `HKCU\Control Panel\NotifyIconSettings` keyed by the
