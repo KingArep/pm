@@ -2820,23 +2820,27 @@ async fn handle_external_stream(
 /// `None` and the route fell through to the upstream-only branch.
 /// Can the ORIGIN resolve this prefix from an id alone?
 ///
-/// Measured against the live origin: `id=tt0944947` answers 499 files with a
-/// `resolved_title`, while `id=mal:54492` and `id=mal:54492:1:12` both answer
-/// HTTP 400 `{"ok":0,"error":"title or id required"}`. Asking anyway spent a
-/// round-trip on the critical path of every `mal:` / `kitsu:` / `anilist:`
-/// episode, before any file could be listed.
+/// `parse_external_id()` names the imdb prefix `"imdb"` and keeps the `tt` inside
+/// the value (`("imdb", "tt0944947")`), which is exactly the pair the origin
+/// indexes. Measured against the live origin:
+/// `id=tt0944947` → 499 files + `resolved_title`, `id=imdb:tt0944947` → same,
+/// `id=tmdb:1399` → 15 files, while `id=tmdb1399`, `id=mal:54492` and
+/// `id=mal:54492:1:12` all answer HTTP 400 `{"ok":0,"error":"title or id
+/// required"}`. Asking anyway spent a round-trip on the critical path of every
+/// `mal:` / `kitsu:` / `anilist:` episode, before any file could be listed.
 fn origin_resolves_by_id(prefix: &str) -> bool {
-    prefix == "tt" || prefix == "tmdb"
+    prefix == "imdb" || prefix == "tmdb"
 }
 
 /// The id an origin probe may send: BARE. Never the item id — it carries the
-/// `:S:E` suffix, which the origin rejects outright — and `tt` concatenates
-/// (`tt0944947`) while every other prefix keeps its colon (`tmdb:123`).
+/// `:S:E` suffix, which the origin rejects outright — `imdb` already holds
+/// `tt0944947`, a bare `tt…` value is accepted as-is by the origin, and every
+/// other prefix keeps its colon (`tmdb:1399`; `tmdb1399` is a 400).
 fn origin_probe_id(prefix: &str, value: &str) -> String {
-    if prefix == "tt" {
-        format!("tt{}", value)
-    } else {
-        format!("{}:{}", prefix, value)
+    match prefix {
+        "imdb" => value.to_string(),
+        "tt" => format!("tt{}", value),
+        _ => format!("{}:{}", prefix, value),
     }
 }
 
@@ -7786,10 +7790,11 @@ mod tests {
     /// that prefix from an id at all (live measurements in [`origin_resolves_by_id`]).
     #[test]
     fn an_origin_probe_uses_a_bare_id_and_only_for_resolvable_prefixes() {
+        // `parse_external_id` names the imdb prefix "imdb" and keeps the `tt`.
+        assert_eq!(origin_probe_id("imdb", "tt0944947"), "tt0944947");
         assert_eq!(origin_probe_id("mal", "54492"), "mal:54492");
-        assert_eq!(origin_probe_id("tt", "0944947"), "tt0944947");
         assert_eq!(origin_probe_id("tmdb", "1399"), "tmdb:1399");
-        assert!(origin_resolves_by_id("tt"));
+        assert!(origin_resolves_by_id("imdb"));
         assert!(origin_resolves_by_id("tmdb"));
         for prefix in ["mal", "kitsu", "anilist", "tvdb", "tvmaze"] {
             assert!(
