@@ -203,6 +203,16 @@ pub struct WpFile {
     pub mime: String,
     pub season_num: i32,
     pub episode_num: i32,
+    /// `duration` in seconds, when the row provides it. `0` = not in the row, and
+    /// the stream builder falls back to the resolve cache. A runtime is the only
+    /// evidence that N identically-named files are the chunks of one release.
+    pub duration: u32,
+    /// `part` — the origin's own split-part index (`tg_file_new.part`). `0` = not
+    /// a part / not populated. This is the ONE ordinal available without probing
+    /// the media: the container carries none (`PrevUID`/`NextUID`, chapters and
+    /// `DateUTC` are all absent on the real split uploads), and duration cannot
+    /// prove order.
+    pub part: i32,
     /// `thumbnail_url` — the poster a Telegram-FILE catalog row shows
     /// (backend.php:15829 `'poster' => $fThumb`). Empty for post files.
     pub thumbnail: String,
@@ -243,6 +253,17 @@ pub fn wp_file_from(v: &Value) -> Option<WpFile> {
         .unwrap_or("")
         .trim()
         .to_string();
+    // `duration` is a number on some rows and a string on others; `part` only
+    // appeared in 2026-10 and is absent from most rows, so both are optional.
+    let duration = v
+        .get("duration")
+        .and_then(|x| {
+            x.as_u64()
+                .or_else(|| x.as_i64().map(|n| n.max(0) as u64))
+                .or_else(|| x.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        })
+        .unwrap_or(0)
+        .min(u32::MAX as u64) as u32;
     Some(WpFile {
         short_code,
         title,
@@ -251,6 +272,8 @@ pub fn wp_file_from(v: &Value) -> Option<WpFile> {
         mime,
         season_num: json_i32(v, "season_num"),
         episode_num: json_i32(v, "episode_num"),
+        duration,
+        part: json_i32(v, "part"),
         thumbnail,
     })
 }
@@ -958,7 +981,38 @@ mod tests {
         assert_eq!(f.mime, "video/x-matroska");
         assert_eq!(f.season_num, 1);
         assert_eq!(f.episode_num, 3);
+        // Neither column is in the legacy row: both must stay at 0, not fail.
+        assert_eq!((f.duration, f.part), (0, 0));
         assert!(wp_file_from(&serde_json::json!({"title": "no code"})).is_none());
+    }
+
+    #[test]
+    fn parses_the_duration_and_part_columns_when_present() {
+        // Shape of `tg_file_new`: `duration` is uint, `part` is uint. A row that
+        // carries them lets the stream builder skip the resolve AND keep the
+        // ordinal the origin already knows.
+        let v = serde_json::json!({
+            "short_code": "rUaIMd",
+            "title": "Obsession.2026.2160p.iT.WEB.DL.UNRATED.DV.HDR10.MULTiBen.The.Men.mp4",
+            "file_size": 4186973969u64,
+            "duration": 1185,
+            "part": 5
+        });
+        let f = wp_file_from(&v).expect("row");
+        assert_eq!(f.duration, 1185);
+        assert_eq!(f.part, 5);
+        // Strings are accepted too: the origin sends some uints quoted.
+        let g = wp_file_from(&serde_json::json!({
+            "short_code": "x", "duration": "4224", "part": "2"
+        }))
+        .expect("row");
+        assert_eq!((g.duration, g.part), (4224, 2));
+        // An unknown/garbage value must degrade to 0, never to a wrong number.
+        let h = wp_file_from(&serde_json::json!({
+            "short_code": "y", "duration": "unknown", "part": -3
+        }))
+        .expect("row");
+        assert_eq!((h.duration, h.part), (0, -3));
     }
 
     #[test]

@@ -1750,16 +1750,17 @@ pub const PART_MIN_TOTAL_SECS: u32 = 3600;
 ///    they are (`sum >= PART_MIN_TOTAL_SECS`).
 ///
 /// Condition 3 is what keeps a duplicated WHOLE file out: two copies of a 2h45m
-/// film have `max ≈ sum/2 ≈ 9.9 ks` and fail the cap. Names that already carry a
-/// `partNNN` index are left to [`group_split_parts`], and the ordinal is left at
-/// `0` because duration cannot prove WHICH chunk comes first (measured: across
-/// 99 multi-part groups the origin's `added_date` agrees with part order 44 times
-/// and disagrees 51 — a coin flip).
+/// film have `max ≈ sum/2 ≈ 9.9 ks` and fail the cap.
+///
+/// The ORDINAL is never invented here: duration cannot prove which chunk comes
+/// first (measured: across 99 multi-part groups the origin's `added_date` agrees
+/// with part order 44 times and disagrees 51 — a coin flip). An ordinal already
+/// set by the name, the caption or the origin's `part` column is preserved.
 pub fn detect_parts_by_duration(files: &mut [FileItem]) {
     let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, f) in files.iter().enumerate() {
-        if f.is_split_part || f.duration == 0 {
-            continue; // name already proved it, or nothing to reason about
+        if f.duration == 0 {
+            continue; // nothing to reason about
         }
         let key = f.title.trim().to_lowercase();
         if key.is_empty() {
@@ -1784,9 +1785,10 @@ pub fn detect_parts_by_duration(files: &mut [FileItem]) {
         let total = idxs.len() as i32;
         for i in idxs {
             files[i].is_split_part = true;
-            files[i].part_num = 0; // order is NOT provable from duration
             files[i].total_parts = total;
-            files[i].clean_base = name.clone();
+            if files[i].clean_base.is_empty() {
+                files[i].clean_base = name.clone();
+            }
         }
     }
 }
@@ -2670,6 +2672,21 @@ mod tests {
         // And a real part index in the NAME still works exactly as before.
         let named = extract_split_part_info("Movie.2024.part002.mkv", "");
         assert!(named.is_part && named.part_num == 2);
+    }
+
+    #[test]
+    fn duration_keeps_an_ordinal_that_came_from_the_row() {
+        // The origin's `part` column (or the caption) may already know the index.
+        // Duration must add the "this is a chunk" evidence without erasing it.
+        let mut files = chunks(&[1361, 1323, 1323]);
+        files[0].is_split_part = true;
+        files[0].part_num = 1;
+        files[0].clean_base = AOC.to_lowercase();
+        detect_parts_by_duration(&mut files);
+        assert!(files.iter().all(|f| f.is_split_part));
+        assert_eq!(files[0].part_num, 1, "a known ordinal is never overwritten");
+        assert_eq!(files[1].part_num, 0, "an unknown one is never invented");
+        assert!(files.iter().all(|f| f.total_parts == 3));
     }
 
     #[test]

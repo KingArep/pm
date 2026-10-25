@@ -2976,10 +2976,27 @@ async fn build_streams_from_files(
             title: f.title.clone(),
             caption: f.caption.clone(),
             file_size: f.file_size,
-            duration: cached_duration(&codes[i], &duration_bot),
+            // A row that carries its own runtime saves the resolve entirely.
+            duration: if f.duration > 0 {
+                f.duration
+            } else {
+                cached_duration(&codes[i], &duration_bot)
+            },
             ..Default::default()
         })
         .collect();
+    // The origin's own `part` column IS the ordinal when it is populated — the
+    // only cheap one there is: `PrevUID`/`NextUID`, chapters and `DateUTC` are all
+    // absent on the real split uploads, and duration cannot prove order.
+    if matched.iter().any(|f| f.part > 0) {
+        for (item, f) in items.iter_mut().zip(matched.iter()) {
+            if f.part > 0 {
+                item.is_split_part = true;
+                item.part_num = f.part;
+                item.clean_base = item.title.trim().to_lowercase();
+            }
+        }
+    }
     // A file's RUNTIME is the only evidence left when several chunks of one
     // release all carry the SAME file name (tt16311594: seven files named
     // `…H265.AOC.mkv`; Obsession: eight named `…Org.AMZN.mkv`, 6621 s together).
