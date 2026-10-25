@@ -196,6 +196,16 @@ fn truthy_ok(v: &Value) -> bool {
 /// How long a stale WordPress body may still be served when a refresh fails.
 const WP_STALE_GRACE: i64 = 21_600;
 
+/// Did the call fail to answer at all?
+///
+/// `http_json()` collapses a transport error, a timeout and every 5xx into an
+/// EMPTY object. A real answer is never empty: a miss is `{"ok":0,"error":…}`
+/// and a hit always carries `ok`. So only the empty shape is worth a retry —
+/// retrying an honest 404/400 would double the work and change nothing.
+fn needs_wp_retry(body: &Value) -> bool {
+    body.as_object().map(|m| m.is_empty()).unwrap_or(false)
+}
+
 /// `fd_cached_wp_json()`: cache keyed on the FULL url, with single-flight and a
 /// stale fallback so a slow origin never blocks playback. Only a truthy `ok` body
 /// is stored, so an error response cannot poison the entry.
@@ -206,7 +216,23 @@ const WP_STALE_GRACE: i64 = 21_600;
 pub async fn cached_wp_json(url: &str, ttl: i64, timeout_secs: u64) -> Value {
     let url_owned = url.to_string();
     let body = crate::cache::fetch_cached("wp_json", url, ttl, WP_STALE_GRACE, move || async move {
-        let fresh = http_json(&url_owned, &[], "GET", timeout_secs).await;
+        let mut fresh = http_json(&url_owned, &[], "GET", timeout_secs).await;
+        // One retry when the call did not answer at all. `http_json()` returns an
+        // EMPTY object for a transport error or a 5xx (`{"ok":0,…}` bodies are
+        // real answers and are left alone), and an empty body here is fatal: the
+        // series/episode list is built from it, so a cold cache plus one origin
+        // 504 answered "No Streams Found" — reproduced on `mal:54492:2:7` and
+        // `mal:54492:2:12`, where the same episodes listed 9 and 7 streams a
+        // minute later. Nothing else fails over in that window: the stale copy
+        // is what usually covers this, and a fresh process has none.
+        if needs_wp_retry(&fresh) {
+            log(
+                "wp request empty, retrying once",
+                &serde_json::json!({"url": url_owned}),
+            );
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            fresh = http_json(&url_owned, &[], "GET", timeout_secs).await;
+        }
         let cacheable = truthy_ok(&fresh);
         (fresh, cacheable)
     })
@@ -255,5 +281,22 @@ pub async fn download_file(url: &str, dest: &std::path::Path, timeout_secs: u64)
             Err(_) => false,
         },
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a DEAD call is retried. An honest miss (`ok:0` + error) and an honest
+    /// empty list (`ok:1`, no items) are answers, and retrying them would double
+    /// the origin work for nothing.
+    #[test]
+    fn only_a_dead_wp_call_is_retried() {
+        assert!(needs_wp_retry(&serde_json::json!({})));
+        assert!(!needs_wp_retry(&serde_json::json!({"ok": 0, "error": "Not found"})));
+        assert!(!needs_wp_retry(&serde_json::json!({"ok": 1, "items": []})));
+        assert!(!needs_wp_retry(&serde_json::json!({"ok": 1, "total": 0})));
+        assert!(!needs_wp_retry(&serde_json::Value::Null));
     }
 }
