@@ -3550,8 +3550,13 @@ fn stream_item(
     if size > 0 {
         spec_bits.push(format!("💾 {}", format_bytes(size)));
     }
-    // Runtime, when the row or the resolve cache knows it: the number that tells
-    // a viewer whether a row is the 2h35m film or one ~22 min chunk of it.
+    // Runtime, when the row or the resolve cache knows it.
+    //
+    // Deliberately on EVERY row, not only on split parts: a normal file's runtime
+    // is useful metadata in its own right (it is what lets a viewer compare a
+    // 2.5 GB copy with a 25 GB one, or spot a truncated upload), and the 🧩 badge
+    // below is what marks a chunk. Restricting this to `is_split_part` would make
+    // it invisible whenever `exclude_part_title` (ON by default) hides the parts.
     if item.duration > 0 {
         spec_bits.push(format!("⏱ {}", format_duration(item.duration)));
     }
@@ -7260,6 +7265,9 @@ mod tests {
         // A whole file: one line, name · size · runtime · tags. Before issue #9,
         // `title` was absent from the JSON entirely and clients that key their row
         // label on it rendered the `name` badge alone.
+        //
+        // The runtime is INTENTIONALLY here and not only on parts — a normal file's
+        // runtime is metadata too (compare a 2.5 GB copy against a 25 GB one).
         let title = title_of(&FileItem {
             title: "x".into(),
             duration: 9332,
