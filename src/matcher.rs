@@ -1607,6 +1607,31 @@ pub fn extract_split_part_info(filename: &str, caption: &str) -> SplitPartInfo {
         }
     }
 
+    // The part index is sometimes ONLY in the caption. Measured on
+    // `Obsession.2026.2160p.4K.HDR10.DV.BluRay.x265.10bit.HEVC.Org.AMZN.mkv`:
+    // all eight chunks share that exact title (the indexer dropped `partNNN`
+    // from it) while the caption still says `…J3RICO.part005.mkv` /
+    // `…J3RICO.part008.mkv`. Without this they read as eight identical films —
+    // and the caption is the only place an ORDER is available, because duration
+    // and the origin's `added_date` cannot prove one.
+    if !matched {
+        let caption_first = cap.lines().next().unwrap_or("").trim();
+        if let Some(g) = groups(RE_PART, caption_first) {
+            let n: i32 = g[1].parse().unwrap_or(0);
+            if n > 0 {
+                part_num = n;
+                if !g[2].is_empty() {
+                    total_parts = g[2].parse().unwrap_or(0);
+                }
+                matched = true;
+                // Group by the FILE name, never by the caption: the eight
+                // siblings share one title, and the title is what
+                // `detect_parts_by_duration` keys on too.
+                clean_base = f.to_string();
+            }
+        }
+    }
+
     if !matched || part_num <= 0 {
         return SplitPartInfo {
             is_part: false,
@@ -2573,6 +2598,78 @@ mod tests {
             extract_media_tags("Obsession.2026.1080p.WEB.x264.mp4", "").source,
             "WEBRip"
         );
+    }
+
+    /* the part index can live in the CAPTION only ---------------------------- */
+
+    const BLURAY: &str = "Obsession.2026.2160p.4K.HDR10.DV.BluRay.x265.10bit.HEVC.Org.AMZN.mkv";
+
+    fn obsession_caption(part: u32) -> String {
+        format!(
+            "Obsession (2026) 2160p 4K HDR10 DV BluRay x265 10bit HEVC [Org AMZN Hindi DDP 5.1 \
+             640Kbps  English TrueHD Atmos 7.1] ESub  J3RICO.part00{part}.mkv\n\
+             [KP] from HM DRIVE [DUMP] 3779026928  "
+        )
+    }
+
+    #[test]
+    fn tags_come_from_the_title_and_the_caption() {
+        let tags = extract_media_tags(BLURAY, &obsession_caption(5));
+        assert_eq!(tags.resolution, "4K");
+        // BluRay outranks AMZN, and both are shown (`platform` + `source`).
+        assert_eq!(tags.source, "BluRay");
+        assert_eq!(tags.platform, "AMZN");
+        assert_eq!(tags.codec, "HEVC");
+        // The audio only exists in the caption: `Atmos` is preferred over DDP 5.1.
+        assert_eq!(tags.audio, "Atmos");
+        assert_eq!(
+            tags.visual,
+            vec!["HDR".to_string(), "DV".to_string(), "10bit".to_string()]
+        );
+    }
+
+    #[test]
+    fn part_number_in_the_caption_is_the_only_ordinal() {
+        // All eight rows share this exact title; only the caption keeps the index.
+        assert!(!extract_split_part_info(BLURAY, "").is_part);
+        let five = extract_split_part_info(BLURAY, &obsession_caption(5));
+        let eight = extract_split_part_info(BLURAY, &obsession_caption(8));
+        assert!(five.is_part && eight.is_part);
+        assert_eq!((five.part_num, eight.part_num), (5, 8));
+        assert_eq!(five.base_key, eight.base_key, "siblings must group together");
+        assert_eq!(five.clean_base, BLURAY);
+    }
+
+    #[test]
+    fn group_split_parts_uses_the_caption_when_the_name_has_no_index() {
+        let mut files = vec![
+            FileItem {
+                title: BLURAY.to_string(),
+                caption: obsession_caption(5),
+                ..Default::default()
+            },
+            FileItem {
+                title: BLURAY.to_string(),
+                caption: obsession_caption(8),
+                ..Default::default()
+            },
+        ];
+        group_split_parts(&mut files);
+        assert!(files.iter().all(|f| f.is_split_part));
+        let mut parts: Vec<i32> = files.iter().map(|f| f.part_num).collect();
+        parts.sort_unstable();
+        assert_eq!(parts, vec![5, 8]);
+    }
+
+    #[test]
+    fn a_caption_part_word_without_a_number_is_not_a_part() {
+        // "Dune Part Two", "in 4 parts" — the word alone is never evidence.
+        assert!(!extract_split_part_info("Dune.Part.Two.2024.1080p.mkv", "Dune Part Two 2024")
+            .is_part);
+        assert!(!extract_split_part_info("Some.Movie.2024.mkv", "Watch it in four parts").is_part);
+        // And a real part index in the NAME still works exactly as before.
+        let named = extract_split_part_info("Movie.2024.part002.mkv", "");
+        assert!(named.is_part && named.part_num == 2);
     }
 
     #[test]

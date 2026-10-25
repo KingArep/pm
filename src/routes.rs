@@ -2963,26 +2963,34 @@ async fn build_streams_from_files(
 
     // Split-part annotation + ordering runs BEFORE the filters, because
     // `exclude_part_title` reads the flag it writes.
+    //
+    // The runtime is filled in FIRST, while `items` is still index-aligned with
+    // `matched` — `group_split_parts` sorts in place, so a later lookup by index
+    // would pair an item with the wrong file.
+    let duration_bot = get_bot_id();
+    let codes: Vec<String> = matched.iter().map(|f| f.short_code.clone()).collect();
     let mut items: Vec<crate::matcher::FileItem> = matched
         .iter()
-        .map(|f| crate::matcher::FileItem {
+        .enumerate()
+        .map(|(i, f)| crate::matcher::FileItem {
             title: f.title.clone(),
             caption: f.caption.clone(),
             file_size: f.file_size,
+            duration: cached_duration(&codes[i], &duration_bot),
             ..Default::default()
         })
         .collect();
-    crate::matcher::group_split_parts(&mut items);
     // A file's RUNTIME is the only evidence left when several chunks of one
     // release all carry the SAME file name (tt16311594: seven files named
-    // `…H265.AOC.mkv`, no part index anywhere, each ~22 min of a 155-min film).
-    // The resolve cache already holds it — `prewarm_streams_batch` resolved every
-    // code in this list on the previous load — so this is a memory read, not a
-    // round trip to the origin.
-    let duration_bot = get_bot_id();
-    for (item, f) in items.iter_mut().zip(matched.iter()) {
-        item.duration = resolve_duration(&f.short_code, &duration_bot);
-    }
+    // `…H265.AOC.mkv`; Obsession: eight named `…Org.AMZN.mkv`, 6621 s together).
+    //
+    // Deliberately CACHE-ONLY. Awaiting a resolve per unknown chunk here measured
+    // **13 s** on the first load of `pm:post:8999920299` (12 codes, 4 of them
+    // hitting the retry ladder) and still missed the group it was meant to
+    // classify. `prewarm_streams_batch` fills the cache in the background instead,
+    // and the codes it is handed are ordered so duplicate-name groups come first
+    // (see below) — so the next load classifies them, at zero added latency.
+    crate::matcher::group_split_parts(&mut items);
     crate::matcher::detect_parts_by_duration(&mut items);
 
     let settings = read_catalog_settings();
@@ -3079,11 +3087,34 @@ async fn build_streams_from_files(
     // Bot API file_id is resolved on the first Range request — the Kotlin app got
     // an instant Play out of exactly this and the port did not. Background, so the
     // list still returns immediately; a resolve error only logs.
-    crate::resolve::prewarm_streams_batch(
-        kept.iter().map(|(idx, _)| matched[*idx].short_code.clone()).collect(),
-        &get_bot_id(),
-        "stream",
-    );
+    // Order matters: `prewarm_streams_batch` resolves at most `PREWARM_LIMIT`
+    // codes per pass, so the members of a duplicate-name group — the only rows a
+    // runtime can classify — go first. Otherwise a list full of other groups'
+    // codes leaves them cold load after load.
+    let mut name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for item in items.iter() {
+        *name_counts
+            .entry(item.title.trim().to_lowercase())
+            .or_default() += 1;
+    }
+    let mut grouped: Vec<String> = Vec::new();
+    let mut singles: Vec<String> = Vec::new();
+    for (idx, _) in kept.iter() {
+        let code = matched[*idx].short_code.clone();
+        if name_counts
+            .get(&items[*idx].title.trim().to_lowercase())
+            .copied()
+            .unwrap_or(0)
+            > 1
+        {
+            grouped.push(code);
+        } else {
+            singles.push(code);
+        }
+    }
+    grouped.extend(singles);
+    crate::resolve::prewarm_streams_batch(grouped, &get_bot_id(), "stream");
     // Upstream items go AFTER ours (backend.php:18124) — a local file is always
     // the better source, and the sponsor is still prepended by
     // `finish_streams()`, so the order ends up sponsor → ours → upstream.
@@ -3576,17 +3607,17 @@ fn stream_item(
 }
 
 /// Runtime in seconds from the resolve cache (`0` = not resolved yet).
-///
-/// Deliberately CACHE-ONLY: `/stream` must never pay a resolve per file just to
-/// label a row. `prewarm_streams_batch` fills this cache for the whole list, so
-/// the second load (and every load after a Play) knows the durations.
-fn resolve_duration(short_code: &str, bot_id: &str) -> u32 {
+fn cached_duration(short_code: &str, bot_id: &str) -> u32 {
     if short_code.is_empty() || bot_id.is_empty() {
         return 0;
     }
     let Some(entry) = crate::resolve::resolve_shortcode_cached(short_code, bot_id) else {
         return 0;
     };
+    duration_of(&entry)
+}
+
+fn duration_of(entry: &Value) -> u32 {
     entry
         .get("duration")
         .and_then(|d| {
@@ -3595,6 +3626,7 @@ fn resolve_duration(short_code: &str, bot_id: &str) -> u32 {
         })
         .unwrap_or(0) as u32
 }
+
 
 /// `💬 🇲🇾 Malay / 🇬🇧 English` (backend.php:17803-17830). Compiled once.
 fn language_flags(title: &str, caption: &str) -> Vec<&'static str> {
@@ -3740,7 +3772,8 @@ pub(crate) fn lan_ip() -> String {
         return ip;
     }
     // `ip -4 addr` is present on Android (toybox), Linux and macOS; parse `inet`.
-    if let Ok(out) = std::process::Command::new("ip").args(["-4", "addr"]).output() {
+    // `proc::cmd` so a stray `ip.exe` on Windows cannot flash a console.
+    if let Ok(out) = crate::proc::cmd("ip").args(["-4", "addr"]).output() {
         let text = String::from_utf8_lossy(&out.stdout).to_string();
         let mut best: Option<(i32, String)> = None;
         let mut iface = String::new();
