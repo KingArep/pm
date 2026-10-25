@@ -2778,6 +2778,17 @@ mod tests {
         let mut whole = chunks(&[9332, 9333]);
         detect_parts_by_duration(&mut whole);
         assert_eq!(apply_stream_filters(&whole, &cfg).len(), 2);
+
+        // Unchecking `exclude_part_title` gives the seven straight back: the flag
+        // is the ONLY thing that removed them. The Obsession chunks are a
+        // different story — they never reach this filter, because they are not in
+        // the post's file set and their 2026 name is a `Near` year against a 2025
+        // post, so `year_keep_mask()` drops them first.
+        let off = StreamFilterConfig {
+            exclude_part_title: false,
+            ..StreamFilterConfig::default()
+        };
+        assert_eq!(apply_stream_filters(&parts, &off).len(), 7);
     }
 
     #[test]
