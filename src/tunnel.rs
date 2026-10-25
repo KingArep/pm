@@ -29,7 +29,7 @@
 //! terminal; on Unix `setsid` (or `nohup`) does the same job.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -615,16 +615,12 @@ async fn run_capture(program: &str, args: &[&str]) -> String {
         let program = program.to_string();
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         move || {
-            let mut cmd = Command::new(program);
+            // `proc::cmd`, never `Command::new`: every helper this runs (netstat,
+            // tasklist, taskkill, ps, kill) would otherwise open a console, and
+            // Windows Terminal makes that a visible window per call.
+            let mut cmd = crate::proc::cmd(program);
             cmd.args(&args)
                 .stdin(Stdio::null());
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                // CREATE_NO_WINDOW: helper tools (netstat, tasklist, taskkill)
-                // must NEVER flash a console window.
-                cmd.creation_flags(0x0800_0000);
-            }
             cmd.output()
                 .map(|o| {
                     let mut s = String::from_utf8_lossy(&o.stdout).to_string();
@@ -842,17 +838,15 @@ fn is_usable_bin(path: &Path) -> bool {
 pub fn which() -> String {
     #[cfg(windows)]
     let out = {
-        let mut cmd = Command::new("where");
+        let mut cmd = crate::proc::cmd("where");
         cmd.arg("cloudflared")
             .stdin(Stdio::null());
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
         cmd.output()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default()
     };
     #[cfg(not(windows))]
-    let out = Command::new("sh")
+    let out = crate::proc::cmd("sh")
         .args(["-c", "command -v cloudflared 2>/dev/null"])
         .stdin(Stdio::null())
         .output()
@@ -1230,17 +1224,12 @@ pub async fn ensure_cloudflared() -> (String, String) {
 /// in for one archive.
 fn extract_tgz(tgz: &Path, dest_bin: &Path) -> bool {
     let dir = dest_bin.parent().unwrap_or_else(|| Path::new("."));
-    let mut cmd = Command::new("tar");
+    let mut cmd = crate::proc::cmd("tar");
     cmd.arg("-xzf")
         .arg(tgz)
         .arg("-C")
         .arg(dir)
         .stdin(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
     let status = cmd.status();
     if let Ok(s) = status {
         if !s.success() {
@@ -1368,7 +1357,7 @@ pub fn spawn(bin: &str, local_url: &str, metrics_port: u16, tunnel_token: &str) 
         )
     };
 
-    let mut cmd = Command::new(&program);
+    let mut cmd = crate::proc::cmd(&program);
     cmd.args(&argv)
         .current_dir(Path::new(bin).parent().unwrap_or_else(|| Path::new(".")))
         .stdin(Stdio::null())
@@ -1395,10 +1384,11 @@ pub fn spawn(bin: &str, local_url: &str, metrics_port: u16, tunnel_token: &str) 
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW: no console of its own, so Ctrl-C in the server's
-        // terminal cannot reach it. CREATE_NEW_PROCESS_GROUP keeps console
-        // control events away from the child as well.
-        cmd.creation_flags(0x0800_0000 | 0x0000_0200);
+        // `proc::cmd` already applied CREATE_NO_WINDOW (no console of its own, so
+        // Ctrl-C in the server's terminal cannot reach it). creation_flags
+        // REPLACES the flag word, so restate it and add CREATE_NEW_PROCESS_GROUP,
+        // which keeps console control events away from the child as well.
+        cmd.creation_flags(crate::proc::CREATE_NO_WINDOW | crate::proc::CREATE_NEW_PROCESS_GROUP);
     }
 
     match cmd.spawn() {
@@ -1431,7 +1421,7 @@ pub fn spawn(bin: &str, local_url: &str, metrics_port: u16, tunnel_token: &str) 
 
 #[cfg(unix)]
 fn which_exe(name: &str) -> bool {
-    Command::new("sh")
+    crate::proc::cmd("sh")
         .args(["-c", &format!("command -v {} >/dev/null 2>&1", name)])
         .stdin(Stdio::null())
         .status()

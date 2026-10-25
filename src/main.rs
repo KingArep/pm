@@ -36,6 +36,7 @@ mod fileid;
 mod httpc;
 mod log;
 mod matcher;
+mod proc;
 mod resolve;
 mod respond;
 mod routes;
@@ -61,7 +62,7 @@ mod wp_data;
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 
 use axum::Router;
@@ -515,22 +516,24 @@ fn rustc_version() -> &'static str {
 /// (server install, headless CI) must never stop the server from running, so a
 /// failure is only logged.
 pub(crate) fn open_browser(url: &str) {
+    // `proc::cmd`, not `Command::new`: a plain `cmd /C start` gets its own console,
+    // so launching the server flashed a command prompt before the browser opened.
     let spawned = if cfg!(target_os = "windows") {
         // `start` is a cmd builtin, and its first quoted argument is the window
         // TITLE - passing an empty "" is what makes the second one the URL.
-        Command::new("cmd")
+        proc::cmd("cmd")
             .args(["/C", "start", "", url])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
     } else if cfg!(target_os = "macos") {
-        Command::new("open")
+        proc::cmd("open")
             .arg(url)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
     } else {
-        Command::new("xdg-open")
+        proc::cmd("xdg-open")
             .arg(url)
             .stdout(Stdio::null())
             .stderr(Stdio::null())

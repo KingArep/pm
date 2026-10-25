@@ -422,12 +422,14 @@ pub async fn apply() -> Value {
             });
         }
     }
+    // `proc::cmd`: a bare `cmd /C start` would spawn its own console and flash a
+    // command prompt mid-update.
     let started = if cfg!(windows) {
-        std::process::Command::new("cmd")
+        crate::proc::cmd("cmd")
             .args(["/C", "start", "", script.to_string_lossy().as_ref(), dest.to_string_lossy().as_ref()])
             .spawn()
     } else {
-        std::process::Command::new("sh")
+        crate::proc::cmd("sh")
             .arg(&script)
             .arg(&dest)
             .spawn()
