@@ -2985,14 +2985,27 @@ async fn build_streams_from_files(
             ..Default::default()
         })
         .collect();
-    // The origin's own `part` column IS the ordinal when it is populated — the
-    // only cheap one there is: `PrevUID`/`NextUID`, chapters and `DateUTC` are all
-    // absent on the real split uploads, and duration cannot prove order.
-    if matched.iter().any(|f| f.part > 0) {
-        for (item, f) in items.iter_mut().zip(matched.iter()) {
-            if f.part > 0 {
-                item.is_split_part = true;
-                item.part_num = f.part;
+    // The origin's own `part` IS the ordinal — the only cheap one there is:
+    // `PrevUID`/`NextUID`, chapters and `DateUTC` are all absent on the real split
+    // uploads, and duration cannot prove order.
+    //
+    // It can arrive in two places and today arrives in neither: the
+    // `post-files`/`search-files` row does not carry it (measured keys: id, title,
+    // caption, short_code, file_type, mime, file_size, extension, added_date,
+    // play_url, ddl_url, thumbnail_url), and neither does `/resolve-file`. So read
+    // BOTH — the row first, then the cached resolve entry we already hold for its
+    // duration — and one field on either side turns every 🧩 badge into a real
+    // `Part n` with no further code change here.
+    for (i, (item, f)) in items.iter_mut().zip(matched.iter()).enumerate() {
+        let part = if f.part > 0 {
+            f.part
+        } else {
+            cached_part(&codes[i], &duration_bot)
+        };
+        if part > 0 {
+            item.is_split_part = true;
+            item.part_num = part;
+            if item.clean_base.is_empty() {
                 item.clean_base = item.title.trim().to_lowercase();
             }
         }
@@ -3645,6 +3658,33 @@ fn duration_of(entry: &Value) -> u32 {
                 .or_else(|| d.as_str().and_then(|s| s.trim().parse().ok()))
         })
         .unwrap_or(0) as u32
+}
+
+/// `part` as carried by a row or a resolve entry (`0` = absent / not a part).
+fn part_of(entry: &Value) -> i32 {
+    entry
+        .get("part")
+        .and_then(|p| {
+            p.as_i64()
+                .or_else(|| p.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+        })
+        .unwrap_or(0)
+        .clamp(0, i32::MAX as i64) as i32
+}
+
+/// The split-part index carried by a CACHED resolve entry (`0` = absent).
+///
+/// The cheap path: `/resolve-file` is the one payload the engine already fetches
+/// (for `duration`), so its `part` costs nothing extra — no media probe, no extra
+/// request. `prewarm_streams_batch` warms those entries in the background.
+fn cached_part(short_code: &str, bot_id: &str) -> i32 {
+    if short_code.is_empty() || bot_id.is_empty() {
+        return 0;
+    }
+    let Some(entry) = crate::resolve::resolve_shortcode_cached(short_code, bot_id) else {
+        return 0;
+    };
+    part_of(&entry)
 }
 
 /// `22 min` / `2h 36m` — the runtime pill. Rounded to the minute: a chunk is
@@ -7251,6 +7291,17 @@ mod tests {
     }
 
     /* ── issue #9: every entry needs a `title` ────────────────────────────── */
+
+    #[test]
+    fn part_is_read_from_numbers_strings_and_absent_cleanly() {
+        assert_eq!(part_of(&serde_json::json!({"part": 4})), 4);
+        assert_eq!(part_of(&serde_json::json!({"part": "7"})), 7);
+        assert_eq!(part_of(&serde_json::json!({})), 0);
+        assert_eq!(part_of(&serde_json::json!({"part": null})), 0);
+        assert_eq!(part_of(&serde_json::json!({"part": "unknown"})), 0);
+        // A negative must never leak through as an ordinal.
+        assert_eq!(part_of(&serde_json::json!({"part": -3})), 0);
+    }
 
     fn item_json(item: &crate::matcher::FileItem) -> serde_json::Value {
         let ctx = ctx_with(&[], "http://127.0.0.1:8088", &[]);
