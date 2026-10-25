@@ -2973,6 +2973,17 @@ async fn build_streams_from_files(
         })
         .collect();
     crate::matcher::group_split_parts(&mut items);
+    // A file's RUNTIME is the only evidence left when several chunks of one
+    // release all carry the SAME file name (tt16311594: seven files named
+    // `…H265.AOC.mkv`, no part index anywhere, each ~22 min of a 155-min film).
+    // The resolve cache already holds it — `prewarm_streams_batch` resolved every
+    // code in this list on the previous load — so this is a memory read, not a
+    // round trip to the origin.
+    let duration_bot = get_bot_id();
+    for (item, f) in items.iter_mut().zip(matched.iter()) {
+        item.duration = resolve_duration(&f.short_code, &duration_bot);
+    }
+    crate::matcher::detect_parts_by_duration(&mut items);
 
     let settings = read_catalog_settings();
     let cfg = crate::matcher::StreamFilterConfig::from_json(
@@ -3015,9 +3026,19 @@ async fn build_streams_from_files(
                 f.file_size,
                 "auto",
             );
+            let item = &items[*idx];
             Some((
                 score,
-                stream_item(ctx, &f.short_code, &f.title, &f.caption, f.file_size, &f.mime),
+                stream_item(
+                    ctx,
+                    &f.short_code,
+                    &f.title,
+                    &f.caption,
+                    f.file_size,
+                    &f.mime,
+                    item.part_num,
+                    item.total_parts,
+                ),
             ))
         })
         .collect();
@@ -3399,6 +3420,7 @@ async fn sponsor_item() -> Option<Value> {
 /// PHP's rule, which is what keeps a Matroska stream from being handed to the
 /// HTML5 player. `bingeGroup` (series only) carries RELEASE attributes and never
 /// an episode number, because Stremio compares it with `===` across episodes.
+#[allow(clippy::too_many_arguments)]
 fn stream_item(
     ctx: &ReqCtx,
     short_code: &str,
@@ -3406,6 +3428,8 @@ fn stream_item(
     caption: &str,
     size: u64,
     mime_hint: &str,
+    part_num: i32,
+    total_parts: i32,
 ) -> Value {
     // Generic `video.mp4` style names take their display title from the caption
     // (backend.php:17739-17744).
@@ -3481,6 +3505,17 @@ fn stream_item(
     if size > 0 {
         spec_bits.push(format!("💾 {}", format_bytes(size)));
     }
+    if total_parts > 1 {
+        // An anonymous chunk of a split release. `exclude_part_title` (ON by
+        // default) drops it when the NAME proves it is a part; when only the
+        // runtime can prove that (seven files, one name), the row at least has
+        // to say so instead of looking identical to its siblings.
+        spec_bits.push(if part_num > 0 {
+            format!("🧩 Part {}/{}", part_num, total_parts)
+        } else {
+            format!("🧩 Split · {} parts", total_parts)
+        });
+    }
     spec_bits.push("⚡ Telegram".to_string());
     for pill in meta_pills {
         if pill != "HDR" {
@@ -3488,6 +3523,10 @@ fn stream_item(
         }
     }
 
+    // Issue #9: every entry was emitted without a `title`, so a client that keys
+    // its row label on `title` showed only the `name` badge — a wall of identical
+    // rows for a six-chunk release. One line: clean name · size · part.
+    let title_line = format!("{} · {}", display_name, spec_bits.join(" · "));
     let mut description = format!("{}\n{}", display_name, spec_bits.join(" • "));
     let flags = language_flags(&display_title, caption);
     if !flags.is_empty() {
@@ -3529,10 +3568,32 @@ fn stream_item(
     let url = build_stream_url(&ctx.base_url, &b64, &file_name);
     serde_json::json!({
         "name": name,
+        "title": title_line,
         "description": description,
         "url": url,
         "behaviorHints": Value::Object(hints),
     })
+}
+
+/// Runtime in seconds from the resolve cache (`0` = not resolved yet).
+///
+/// Deliberately CACHE-ONLY: `/stream` must never pay a resolve per file just to
+/// label a row. `prewarm_streams_batch` fills this cache for the whole list, so
+/// the second load (and every load after a Play) knows the durations.
+fn resolve_duration(short_code: &str, bot_id: &str) -> u32 {
+    if short_code.is_empty() || bot_id.is_empty() {
+        return 0;
+    }
+    let Some(entry) = crate::resolve::resolve_shortcode_cached(short_code, bot_id) else {
+        return 0;
+    };
+    entry
+        .get("duration")
+        .and_then(|d| {
+            d.as_u64()
+                .or_else(|| d.as_str().and_then(|s| s.trim().parse().ok()))
+        })
+        .unwrap_or(0) as u32
 }
 
 /// `💬 🇲🇾 Malay / 🇬🇧 English` (backend.php:17803-17830). Compiled once.
@@ -7101,6 +7162,42 @@ mod tests {
             local: String::new(),
             base_url: base.to_string(),
         }
+    }
+
+    /* ── issue #9: every entry needs a `title` ────────────────────────────── */
+
+    #[test]
+    fn stream_item_carries_a_title_and_a_part_marker() {
+        let ctx = ctx_with(&[], "http://127.0.0.1:8088", &[]);
+        let name = "F1.The.Movie.2025.Hybrid.2160p.WEB.DL.DV.HDR.DDP5.1.Atmos.H265.AOC.mkv";
+
+        // A whole file: one line, name · size · tags. Before this, `title` was
+        // absent from the JSON entirely and clients that key their row label on it
+        // rendered the `name` badge alone.
+        let whole = stream_item(&ctx, "8R44Xx", name, "", 4_161_635_508, "video/x-matroska", 0, 0);
+        let title = whole.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(!title.is_empty(), "title must not be empty");
+        assert!(title.contains("💾 3.9 GB"), "size belongs in the title: {title}");
+        assert!(!title.contains("Part"), "a whole file is not a part: {title}");
+        assert!(!title.contains("Split"), "a whole file is not a split: {title}");
+        // The two-line description Stremio shows when expanded is unchanged.
+        assert!(whole
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains('\n'));
+
+        // A part whose ordinal is known (name carried `partNNN`).
+        let known = stream_item(&ctx, "3gojEp", name, "", 4_167_820_842, "video/x-matroska", 3, 7);
+        let title = known.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(title.contains("Part 3/7"), "ordinal must be shown: {title}");
+
+        // A part detected from DURATION only — seven identical names, no ordinal.
+        // Saying "Part 0/7" would be a lie, so it states the shape instead.
+        let anonymous = stream_item(&ctx, "d63Zs9", name, "", 4_159_930_455, "video/x-matroska", 0, 7);
+        let title = anonymous.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(title.contains("Split · 7 parts"), "split shape must be shown: {title}");
+        assert!(!title.contains("Part 0"), "never invent an ordinal: {title}");
     }
 
     #[test]

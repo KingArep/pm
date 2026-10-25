@@ -1629,7 +1629,11 @@ pub struct FileItem {
     pub title: String,
     pub caption: String,
     pub file_size: u64,
-    /// Annotation written by [`group_split_parts`].
+    /// Runtime in seconds (`fd_resolve_shortcode`'s `duration`). `0` = unknown.
+    /// Used by [`detect_parts_by_duration`], which is the only evidence left when
+    /// seven chunks of one film all carry the SAME file name.
+    pub duration: u32,
+    /// Annotation written by [`group_split_parts`] / [`detect_parts_by_duration`].
     pub is_split_part: bool,
     pub part_num: i32,
     pub total_parts: i32,
@@ -1683,6 +1687,74 @@ pub fn group_split_parts(files: &mut [FileItem]) {
         file.part_num = info.part_num;
         file.total_parts = info.total_parts;
         file.clean_base = info.clean_base.clone();
+    }
+}
+
+/// A chunk that is still shorter than a feature on its own. Above this a file is
+/// a whole film/episode, not a slice of one (measured: the two 1080p copies of
+/// `F1.The.Movie.2025…YTS.MX.mp4` are 9 948 / 9 947 s).
+pub const PART_MAX_CHUNK_SECS: u32 = 3900;
+
+/// The chunks of a split release have to ADD UP to something feature-length,
+/// otherwise they are unrelated short clips that merely share a file name.
+pub const PART_MIN_TOTAL_SECS: u32 = 3600;
+
+/// Detect split parts from DURATION when the file names carry no part index.
+///
+/// Measured on `tt16311594` (F1 The Movie 2025, 4K DV): seven files are all named
+/// `F1.The.Movie.2025.Hybrid.2160p.WEB.DL.DV.HDR.DDP5.1.Atmos.H265.AOC.mkv`, so
+/// [`extract_split_part_info`] sees nothing, and the player shows a wall of
+/// identical rows. Their runtimes are the only proof: 1361 + 1323 + 1323 + 1401
+/// + 1289 + 1313 + 1322 s = 9332 s (155.5 min) — the film, chopped into ~22 min
+/// chunks that each restart their Matroska timeline at 0.
+///
+/// The rule is deliberately NARROW — identical names only, and all three
+/// conditions must hold:
+///
+/// 1. at least two files share the exact name (one file is never a part);
+/// 2. every one of them has a known duration;
+/// 3. no chunk is feature-length (`max < PART_MAX_CHUNK_SECS`) while together
+///    they are (`sum >= PART_MIN_TOTAL_SECS`).
+///
+/// Condition 3 is what keeps a duplicated WHOLE file out: two copies of a 2h45m
+/// film have `max ≈ sum/2 ≈ 9.9 ks` and fail the cap. Names that already carry a
+/// `partNNN` index are left to [`group_split_parts`], and the ordinal is left at
+/// `0` because duration cannot prove WHICH chunk comes first (measured: across
+/// 99 multi-part groups the origin's `added_date` agrees with part order 44 times
+/// and disagrees 51 — a coin flip).
+pub fn detect_parts_by_duration(files: &mut [FileItem]) {
+    let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, f) in files.iter().enumerate() {
+        if f.is_split_part || f.duration == 0 {
+            continue; // name already proved it, or nothing to reason about
+        }
+        let key = f.title.trim().to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        by_name.entry(key).or_default().push(i);
+    }
+
+    for (name, idxs) in by_name {
+        if idxs.len() < 2 {
+            continue;
+        }
+        let max = idxs
+            .iter()
+            .map(|i| files[*i].duration)
+            .max()
+            .unwrap_or(0);
+        let sum: u64 = idxs.iter().map(|i| files[*i].duration as u64).sum();
+        if max >= PART_MAX_CHUNK_SECS || sum < PART_MIN_TOTAL_SECS as u64 {
+            continue;
+        }
+        let total = idxs.len() as i32;
+        for i in idxs {
+            files[i].is_split_part = true;
+            files[i].part_num = 0; // order is NOT provable from duration
+            files[i].total_parts = total;
+            files[i].clean_base = name.clone();
+        }
     }
 }
 
@@ -2466,6 +2538,80 @@ mod tests {
         files[0].is_split_part = true;
         let kept = apply_stream_filters(&files, &cfg);
         assert!(kept.is_empty(), "exclude_part_title defaults to ON");
+    }
+
+    /* duration-based part detection ------------------------------------------ */
+
+    const AOC: &str = "F1.The.Movie.2025.Hybrid.2160p.WEB.DL.DV.HDR.DDP5.1.Atmos.H265.AOC.mkv";
+
+    fn chunks(durations: &[u32]) -> Vec<FileItem> {
+        durations
+            .iter()
+            .map(|d| FileItem {
+                title: AOC.to_string(),
+                file_size: 4_160_000_000,
+                duration: *d,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn duration_flags_the_seven_anonymous_f1_chunks() {
+        // Measured from the origin (`tg_file_new.part` + `/resolve-shortcode`):
+        // seven files, one name, 9332 s together — a 2h35m film in ~22 min chunks.
+        let mut files = chunks(&[1361, 1323, 1323, 1401, 1289, 1313, 1322]);
+        detect_parts_by_duration(&mut files);
+        assert!(files.iter().all(|f| f.is_split_part), "every chunk must be flagged");
+        assert!(files.iter().all(|f| f.total_parts == 7));
+        assert!(files.iter().all(|f| f.part_num == 0), "duration cannot prove the ordinal");
+        assert_eq!(files[0].clean_base, AOC.to_lowercase());
+    }
+
+    #[test]
+    fn duration_leaves_a_duplicated_whole_file_alone() {
+        // Two copies of the same 2h45m film: max ≈ sum/2, so the cap rejects them.
+        let mut files = chunks(&[9948, 9947]);
+        detect_parts_by_duration(&mut files);
+        assert!(files.iter().all(|f| !f.is_split_part));
+    }
+
+    #[test]
+    fn duration_never_flags_a_lone_file() {
+        // A single 15-min clip that happens to be short is NOT a part.
+        let mut files = chunks(&[900]);
+        detect_parts_by_duration(&mut files);
+        assert!(!files[0].is_split_part);
+    }
+
+    #[test]
+    fn duration_requires_every_chunk_to_be_known() {
+        // One unknown duration = no evidence; silence beats a wrong label.
+        let mut files = chunks(&[1361, 0, 1323]);
+        detect_parts_by_duration(&mut files);
+        assert!(files.iter().all(|f| !f.is_split_part));
+    }
+
+    #[test]
+    fn duration_ignores_unrelated_short_clips() {
+        // 3 × 8 min = 24 min: named the same, but they do not add up to a feature.
+        let mut files = chunks(&[480, 480, 480]);
+        detect_parts_by_duration(&mut files);
+        assert!(files.iter().all(|f| !f.is_split_part));
+    }
+
+    #[test]
+    fn duration_detection_feeds_the_default_exclude_filter() {
+        // The whole point: `exclude_part_title` (ON by default) must act on the
+        // chunks once duration proves them, and must leave a whole file alone.
+        let cfg = StreamFilterConfig::default();
+        let mut parts = chunks(&[1361, 1323, 1323, 1401, 1289, 1313, 1322]);
+        detect_parts_by_duration(&mut parts);
+        assert!(apply_stream_filters(&parts, &cfg).is_empty());
+
+        let mut whole = chunks(&[9332, 9333]);
+        detect_parts_by_duration(&mut whole);
+        assert_eq!(apply_stream_filters(&whole, &cfg).len(), 2);
     }
 
     #[test]
