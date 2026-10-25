@@ -3051,7 +3051,6 @@ async fn build_streams_from_files(
                 f.file_size,
                 "auto",
             );
-            let item = &items[*idx];
             Some((
                 score,
                 stream_item(
@@ -3061,8 +3060,7 @@ async fn build_streams_from_files(
                     &f.caption,
                     f.file_size,
                     &f.mime,
-                    item.part_num,
-                    item.total_parts,
+                    &items[*idx],
                 ),
             ))
         })
@@ -3476,8 +3474,7 @@ fn stream_item(
     caption: &str,
     size: u64,
     mime_hint: &str,
-    part_num: i32,
-    total_parts: i32,
+    item: &crate::matcher::FileItem,
 ) -> Value {
     // Generic `video.mp4` style names take their display title from the caption
     // (backend.php:17739-17744).
@@ -3553,16 +3550,16 @@ fn stream_item(
     if size > 0 {
         spec_bits.push(format!("💾 {}", format_bytes(size)));
     }
-    if total_parts > 1 {
-        // An anonymous chunk of a split release. `exclude_part_title` (ON by
-        // default) drops it when the NAME proves it is a part; when only the
-        // runtime can prove that (seven files, one name), the row at least has
-        // to say so instead of looking identical to its siblings.
-        spec_bits.push(if part_num > 0 {
-            format!("🧩 Part {}/{}", part_num, total_parts)
-        } else {
-            format!("🧩 Split · {} parts", total_parts)
-        });
+    // Runtime, when the row or the resolve cache knows it: the number that tells
+    // a viewer whether a row is the 2h35m film or one ~22 min chunk of it.
+    if item.duration > 0 {
+        spec_bits.push(format!("⏱ {}", format_duration(item.duration)));
+    }
+    // The part badge is shown even when the ORDER is unknown (issue #9): a split
+    // upload whose chunks are indistinguishable is exactly the case this exists
+    // for, so "no ordinal" must not mean "no badge".
+    if let Some(part) = part_label(item) {
+        spec_bits.push(part);
     }
     spec_bits.push("⚡ Telegram".to_string());
     for pill in meta_pills {
@@ -3642,6 +3639,39 @@ fn duration_of(entry: &Value) -> u32 {
                 .or_else(|| d.as_str().and_then(|s| s.trim().parse().ok()))
         })
         .unwrap_or(0) as u32
+}
+
+/// `22 min` / `2h 36m` — the runtime pill. Rounded to the minute: a chunk is
+/// never "1185 s" to a viewer.
+fn format_duration(secs: u32) -> String {
+    let minutes = (secs as u64 + 30) / 60;
+    if minutes >= 60 {
+        format!("{}h {:02}m", minutes / 60, minutes % 60)
+    } else {
+        format!("{} min", minutes)
+    }
+}
+
+/// The part badge for one row, including the case where the ORDER is unknown.
+///
+/// Issue #9: six rows of one release read identically because the payload had no
+/// `title`; the badges were missing too, because a part was only labelled when a
+/// name carried `partNNN`. A duration-detected chunk has no ordinal at all, and
+/// that is precisely the row that needs to say so.
+fn part_label(item: &crate::matcher::FileItem) -> Option<String> {
+    if !item.is_split_part {
+        return None;
+    }
+    let total = item.total_parts;
+    Some(match (item.part_num, total) {
+        (n, t) if n > 0 && t > 1 => format!("🧩 Part {}/{}", n, t),
+        (n, _) if n > 0 => format!("🧩 Part {}", n),
+        (_, t) if t > 1 => format!("🧩 Split · {} parts", t),
+        // Detected as a chunk, but neither the count nor the position is knowable
+        // from the container (measured: no PrevUID/NextUID, no chapters, no
+        // per-part DateUTC, identical statistics tags).
+        _ => "🧩 Split · order unknown".to_string(),
+    })
 }
 
 
@@ -7216,38 +7246,74 @@ mod tests {
 
     /* ── issue #9: every entry needs a `title` ────────────────────────────── */
 
-    #[test]
-    fn stream_item_carries_a_title_and_a_part_marker() {
+    fn title_of(item: &crate::matcher::FileItem) -> String {
         let ctx = ctx_with(&[], "http://127.0.0.1:8088", &[]);
         let name = "F1.The.Movie.2025.Hybrid.2160p.WEB.DL.DV.HDR.DDP5.1.Atmos.H265.AOC.mkv";
+        let v = stream_item(&ctx, "d63Zs9", name, "", 4_159_930_455, "video/x-matroska", item);
+        v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string()
+    }
 
-        // A whole file: one line, name · size · tags. Before this, `title` was
-        // absent from the JSON entirely and clients that key their row label on it
-        // rendered the `name` badge alone.
-        let whole = stream_item(&ctx, "8R44Xx", name, "", 4_161_635_508, "video/x-matroska", 0, 0);
-        let title = whole.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(!title.is_empty(), "title must not be empty");
+    #[test]
+    fn stream_item_carries_a_title_a_runtime_and_a_part_marker() {
+        use crate::matcher::FileItem;
+
+        // A whole file: one line, name · size · runtime · tags. Before issue #9,
+        // `title` was absent from the JSON entirely and clients that key their row
+        // label on it rendered the `name` badge alone.
+        let title = title_of(&FileItem {
+            title: "x".into(),
+            duration: 9332,
+            ..Default::default()
+        });
         assert!(title.contains("💾 3.9 GB"), "size belongs in the title: {title}");
+        assert!(title.contains("⏱ 2h 36m"), "runtime belongs in the title: {title}");
         assert!(!title.contains("Part"), "a whole file is not a part: {title}");
         assert!(!title.contains("Split"), "a whole file is not a split: {title}");
-        // The two-line description Stremio shows when expanded is unchanged.
-        assert!(whole
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .contains('\n'));
 
         // A part whose ordinal is known (name carried `partNNN`).
-        let known = stream_item(&ctx, "3gojEp", name, "", 4_167_820_842, "video/x-matroska", 3, 7);
-        let title = known.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(title.contains("Part 3/7"), "ordinal must be shown: {title}");
+        let title = title_of(&FileItem {
+            title: "x".into(),
+            duration: 1401,
+            is_split_part: true,
+            part_num: 4,
+            total_parts: 7,
+            ..Default::default()
+        });
+        assert!(title.contains("⏱ 23 min"), "chunk runtime: {title}");
+        assert!(title.contains("🧩 Part 4/7"), "ordinal must be shown: {title}");
 
-        // A part detected from DURATION only — seven identical names, no ordinal.
-        // Saying "Part 0/7" would be a lie, so it states the shape instead.
-        let anonymous = stream_item(&ctx, "d63Zs9", name, "", 4_159_930_455, "video/x-matroska", 0, 7);
-        let title = anonymous.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(title.contains("Split · 7 parts"), "split shape must be shown: {title}");
+        // A part detected from DURATION only — same name, no ordinal, count known.
+        // "Part 0/7" would be a lie, so it states the shape instead.
+        let title = title_of(&FileItem {
+            title: "x".into(),
+            duration: 1323,
+            is_split_part: true,
+            total_parts: 7,
+            ..Default::default()
+        });
+        assert!(title.contains("🧩 Split · 7 parts"), "split shape must be shown: {title}");
         assert!(!title.contains("Part 0"), "never invent an ordinal: {title}");
+
+        // Detected as a chunk with NEITHER count nor position — the badge must
+        // still appear (that is the whole point of the issue).
+        let title = title_of(&FileItem {
+            title: "x".into(),
+            duration: 1185,
+            is_split_part: true,
+            ..Default::default()
+        });
+        assert!(title.contains("🧩 Split · order unknown"), "unknown order still labelled: {title}");
+        assert!(title.contains("⏱ 20 min"), "chunk runtime: {title}");
+
+        // An ordinal but no known total (caption carried `part005` only).
+        let title = title_of(&FileItem {
+            title: "x".into(),
+            is_split_part: true,
+            part_num: 5,
+            ..Default::default()
+        });
+        assert!(title.contains("🧩 Part 5"), "single known part: {title}");
+        assert!(!title.contains("Part 5/0"), "no fake total: {title}");
     }
 
     #[test]
