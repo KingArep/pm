@@ -3020,7 +3020,16 @@ async fn build_streams_from_files(
     // classify. `prewarm_streams_batch` fills the cache in the background instead,
     // and the codes it is handed are ordered so duplicate-name groups come first
     // (see below) — so the next load classifies them, at zero added latency.
-    crate::matcher::group_split_parts(&mut items);
+    let perm = crate::matcher::group_split_parts(&mut items);
+    // `group_split_parts` reorders `items` in place (the PHP sorts in place too),
+    // and `matched` is the parallel vector everything printed here is read from.
+    // Re-apply the same permutation, or `matched[*idx]` describes a DIFFERENT
+    // file than the annotation at `items[*idx]` — which is how a dropped split
+    // part still reached the player under a kept row's payload
+    // (`pm:post:9000009680`: 77 flagged + filtered, 16 part names still listed).
+    if perm.iter().enumerate().any(|(i, &p)| i != p) {
+        matched = crate::matcher::reorder_with(&matched, &perm);
+    }
     crate::matcher::detect_parts_by_duration(&mut items);
 
     let settings = read_catalog_settings();
@@ -7752,6 +7761,53 @@ mod tests {
             merge_settings_layers(Some(serde_json::json!("nope")), None),
             serde_json::json!({})
         );
+    }
+
+    /// A dropped split part must never lend its NAME to a row that survived.
+    ///
+    /// `group_split_parts` reorders its input (the PHP sorts in place), while the
+    /// route keeps the source rows in a parallel vector. Real shape from
+    /// `pm:post:9000009680` — split groups scattered among whole files — the
+    /// pairing used to break here: 77 parts were flagged and filtered out, yet 16
+    /// part names still reached the player, each sitting on another file's
+    /// payload. The permutation is what keeps `rows[i]` and `items[i]` the same
+    /// file.
+    #[test]
+    fn a_dropped_split_part_never_lends_its_name_to_a_kept_row() {
+        let names = [
+            "Movie.2026.4K.HDR.part003.mkv",
+            "Movie.2026.1080p.WEB-DL.mkv",
+            "Movie.2026.4K.SDR.part001.mkv",
+            "Movie.2026.720p.WEB-DL.mkv",
+            "Movie.2026.4K.HDR.part001.mkv",
+            "Movie.2026.4K.SDR.part002.mkv",
+            "Movie.2026.4K.HDR.part002.mkv",
+        ];
+        let mut items: Vec<crate::matcher::FileItem> = names
+            .iter()
+            .map(|n| crate::matcher::FileItem {
+                title: n.to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let mut rows: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        let perm = crate::matcher::group_split_parts(&mut items);
+        assert_eq!(perm.len(), rows.len());
+        rows = crate::matcher::reorder_with(&rows, &perm);
+
+        let kept = crate::matcher::apply_stream_filters(
+            &items,
+            &crate::matcher::StreamFilterConfig::default(),
+        );
+        assert_eq!(kept.len(), 2, "only the two whole files survive");
+        for (idx, _) in kept {
+            assert_eq!(rows[idx], items[idx].title, "row {idx} lost its pairing");
+            assert!(
+                !crate::matcher::extract_split_part_info(&rows[idx], "").is_part,
+                "{} is a split part",
+                rows[idx]
+            );
+        }
     }
 
     #[test]

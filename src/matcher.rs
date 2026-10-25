@@ -1680,22 +1680,40 @@ pub struct FileItem {
 /// `pm_file_ZMf0Rn` ("Detective.Conan.Episode.100.Malay.Dub.Special.Episode
 /// .Part.1…", 1.28 GB, one complete episode) answered "No Streams Found"
 /// because `exclude_part_title` is ON by default.
-pub fn group_split_parts(files: &mut [FileItem]) {
+/// Returns the permutation that was applied: `files_new[i] == files_old[perm[i]]`.
+///
+/// The caller MUST use it. This function reorders its input (PHP sorts in
+/// place), and the stream route keeps a second parallel vector of the source
+/// rows (`matched`). Pairing the sorted annotations with an unsorted row list by
+/// index displayed a DROPPED part's file name under a KEPT row's payload —
+/// measured on `pm:post:9000009680`: 77 rows flagged and filtered out, yet 16
+/// part names reached the player because `matched[i]` and `items[i]` were no
+/// longer the same file. With the permutation the two vectors are re-aligned and
+/// `items[i]` is `matched[i]` again.
+pub fn group_split_parts(files: &mut [FileItem]) -> Vec<usize> {
     // Order parts of the same base ascending (PHP sorts in place).
-    files.sort_by(|a, b| {
-        let ai = extract_split_part_info(&a.title, &a.caption);
-        let bi = extract_split_part_info(&b.title, &b.caption);
+    let infos: Vec<SplitPartInfo> = files
+        .iter()
+        .map(|f| extract_split_part_info(&f.title, &f.caption))
+        .collect();
+    let mut perm: Vec<usize> = (0..files.len()).collect();
+    perm.sort_by(|&a, &b| {
+        let (ai, bi) = (&infos[a], &infos[b]);
         if ai.is_part && bi.is_part && ai.base_key == bi.base_key {
             ai.part_num.cmp(&bi.part_num)
         } else {
             std::cmp::Ordering::Equal
         }
     });
-
-    let infos: Vec<SplitPartInfo> = files
-        .iter()
-        .map(|f| extract_split_part_info(&f.title, &f.caption))
-        .collect();
+    let moved = perm.iter().enumerate().any(|(i, &p)| i != p);
+    let mut infos = infos;
+    if moved {
+        let sorted: Vec<FileItem> = perm.iter().map(|&i| files[i].clone()).collect();
+        for (slot, item) in files.iter_mut().zip(sorted) {
+            *slot = item;
+        }
+        infos = perm.iter().map(|&i| infos[i].clone()).collect();
+    }
 
     let mut parts_by_base: HashMap<String, HashSet<i32>> = HashMap::new();
     for info in &infos {
@@ -1721,6 +1739,21 @@ pub fn group_split_parts(files: &mut [FileItem]) {
         file.total_parts = info.total_parts;
         file.clean_base = info.clean_base.clone();
     }
+    perm
+}
+
+/// Re-align a parallel vector (the route's source rows) with the order
+/// [`group_split_parts`] left the annotations in.
+///
+/// Split parts only exist relative to siblings, and the PHP sorts the part list
+/// ascending — so the annotation vector is permuted while the row vector is not.
+/// Every `rows[i]` / `items[i]` pairing after that point is a different file
+/// unless the permutation is replayed here.
+pub fn reorder_with<T: Clone>(rows: &[T], perm: &[usize]) -> Vec<T> {
+    if perm.len() != rows.len() {
+        return rows.to_vec();
+    }
+    perm.iter().map(|&i| rows[i].clone()).collect()
 }
 
 /// A chunk that is still shorter than a feature on its own. Above this a file is
