@@ -106,6 +106,17 @@ fn main() {
     let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
     walk(&public, &mut acc);
     println!("cargo:rerun-if-changed=build.rs");
+    // A new COMMIT must move the version string as well. Without these, this
+    // script does not re-run for a source-only commit, so `PM_BUILD_VERSION` keeps
+    // reporting the commit that was HEAD the last time build.rs ran — a freshly
+    // built binary then looks identical to the old one in `/api/version`.
+    // (Measured while deploying: the new binary served the new stream rows while
+    // still claiming `2.9.9-4-g9750c9f`.)
+    for marker in [".git/HEAD", ".git/refs/heads", ".git/packed-refs"] {
+        if manifest.join(marker).exists() {
+            println!("cargo:rerun-if-changed={}", marker);
+        }
+    }
     println!("cargo:rustc-env=PM_PUBLIC_FINGERPRINT={:016x}", acc);
     // Exported as the engine version *and* as a fingerprint input: a new commit
     // must change the version string even when no tracked file was touched.
