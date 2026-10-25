@@ -4120,9 +4120,16 @@ fn default_catalog_options() -> Value {
         "pm_series_top": {"type": "series", "group": "special", "name": "Popular (Series)", "default": true},
         "pm_series_year": {"type": "series", "group": "special", "name": "New (Series)", "default": true},
         "pm_search_series": {"type": "series", "group": "special", "name": "Search Series", "default": true},
-        "pm_files_year": {"type": "other", "group": "special", "name": "New (Telegram Files)", "default": true},
+        // OFF on a fresh install by request: the Telegram-file "New" row and the
+        // trending-keyword file rows are the two that cost an origin scan per
+        // boot and neither is a browsing surface people land on. Both stay
+        // switchable — the dashboard writes an explicit `true` to turn them back
+        // on — but a fresh settings file must not ship them enabled, because
+        // `default_catalog_settings()` seeds every switch from this flag and a
+        // missing key means ENABLED ([`catalog_switch()`]).
+        "pm_files_year": {"type": "other", "group": "special", "name": "New (Telegram Files)", "default": false},
         "pm_search_files": {"type": "other", "group": "special", "name": "Telegram Files (Search)", "default": true},
-        "pm_trending_keywords": {"type": "other", "group": "special", "name": "Trending Keywords (Files)", "default": true},
+        "pm_trending_keywords": {"type": "other", "group": "special", "name": "Trending Keywords (Files)", "default": false},
         // The port's own merged trending rows. `group: "trending"` puts them in
         // the main list (only `special` gets its own column) and gives each row
         // its own checkbox, so it can be hidden without touching the PHP's
@@ -6997,6 +7004,11 @@ mod tests {
             "pm_series_japan",
             "pm_series_thai",
             "pm_series_philippines",
+            // Off by request on top of the PHP's four: the Telegram-file "New"
+            // row and the trending-keyword file rows. Both spend an origin scan
+            // per boot and neither is a browsing surface people land on.
+            "pm_files_year",
+            "pm_trending_keywords",
         ];
         for id in off {
             assert_eq!(
@@ -7008,7 +7020,8 @@ mod tests {
         for id in [
             "top",
             "pm_series_top",
-            "pm_files_year",
+            "pm_search_files",
+            "pm_trending_movies",
             "pm_movies_malay",
             "pm_movies_english",
             "pm_series_kdrama",
@@ -7045,7 +7058,16 @@ mod tests {
         let opts = default_catalog_options();
         for c in catalog_rows() {
             let id = c["id"].as_str().unwrap_or("");
-            let want = opts[id]["default"].as_bool().unwrap_or(true);
+            // `top` is shared by three rows, and the gate reads a DIFFERENT
+            // switch for two of them (`pm_series_top`, `pm_files_year`), so the
+            // expectation has to be remapped exactly like
+            // [`catalog_advertised()`] remaps the check.
+            let key = match (c["type"].as_str().unwrap_or(""), id) {
+                ("series", "top") => "pm_series_top",
+                ("other", "top") => "pm_files_year",
+                _ => id,
+            };
+            let want = opts[key]["default"].as_bool().unwrap_or(true);
             assert_eq!(
                 catalog_advertised(&fresh, &c),
                 want,
@@ -7095,10 +7117,16 @@ mod tests {
         );
         assert!(topkw.get("extraSupported").is_none());
         assert!(topkw.get("extraRequired").is_none());
+        // The master toggle now ships OFF — a fresh install does not spend an
+        // origin scan on keyword file rows — and an explicit `true` brings the
+        // whole `pm_topkw_*` family back.
         let mut kw_off = default_catalog_settings();
         kw_off["enabled_catalogs"]["pm_trending_keywords"] = serde_json::json!(false);
         assert!(!catalog_advertised(&kw_off, &topkw));
-        assert!(catalog_advertised(&default_catalog_settings(), &topkw));
+        assert!(!catalog_advertised(&default_catalog_settings(), &topkw));
+        let mut kw_on = default_catalog_settings();
+        kw_on["enabled_catalogs"]["pm_trending_keywords"] = serde_json::json!(true);
+        assert!(catalog_advertised(&kw_on, &topkw));
         // The port's trending rows follow their own id.
         let mut trending_off = default_catalog_settings();
         trending_off["enabled_catalogs"][TRENDING_MOVIE_CATALOG] = serde_json::json!(false);
