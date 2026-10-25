@@ -3546,6 +3546,7 @@ fn stream_item(
     if !tags.edition.is_empty() {
         meta_pills.push(tags.edition.clone());
     }
+    let part = part_label(item);
     let mut spec_bits: Vec<String> = Vec::new();
     if size > 0 {
         spec_bits.push(format!("💾 {}", format_bytes(size)));
@@ -3560,12 +3561,6 @@ fn stream_item(
     if item.duration > 0 {
         spec_bits.push(format!("⏱ {}", format_duration(item.duration)));
     }
-    // The part badge is shown even when the ORDER is unknown (issue #9): a split
-    // upload whose chunks are indistinguishable is exactly the case this exists
-    // for, so "no ordinal" must not mean "no badge".
-    if let Some(part) = part_label(item) {
-        spec_bits.push(part);
-    }
     spec_bits.push("⚡ Telegram".to_string());
     for pill in meta_pills {
         if pill != "HDR" {
@@ -3573,11 +3568,17 @@ fn stream_item(
         }
     }
 
-    // Issue #9: every entry was emitted without a `title`, so a client that keys
-    // its row label on `title` showed only the `name` badge — a wall of identical
-    // rows for a six-chunk release. One line: clean name · size · part.
-    let title_line = format!("{} · {}", display_name, spec_bits.join(" · "));
-    let mut description = format!("{}\n{}", display_name, spec_bits.join(" • "));
+    // Issue #9. The real client (Nuvio) renders the `name` badge, then the FIRST
+    // line of `description` large, then the pill line — and it ignores `title`
+    // entirely. So a part marker that only lives in the pills still leaves six
+    // chunks looking identical on the line people actually read: it goes on the
+    // file-name line. `title` carries the same text for clients that do use it.
+    let file_line = match &part {
+        Some(p) => format!("{} · {}", display_name, p),
+        None => display_name.clone(),
+    };
+    let title_line = format!("{} · {}", file_line, spec_bits.join(" · "));
+    let mut description = format!("{}\n{}", file_line, spec_bits.join(" • "));
     let flags = language_flags(&display_title, caption);
     if !flags.is_empty() {
         description.push_str(&format!("\n💬 {}", flags.join(" / ")));
@@ -7251,77 +7252,111 @@ mod tests {
 
     /* ── issue #9: every entry needs a `title` ────────────────────────────── */
 
-    fn title_of(item: &crate::matcher::FileItem) -> String {
+    fn item_json(item: &crate::matcher::FileItem) -> serde_json::Value {
         let ctx = ctx_with(&[], "http://127.0.0.1:8088", &[]);
         let name = "F1.The.Movie.2025.Hybrid.2160p.WEB.DL.DV.HDR.DDP5.1.Atmos.H265.AOC.mkv";
-        let v = stream_item(&ctx, "d63Zs9", name, "", 4_159_930_455, "video/x-matroska", item);
-        v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string()
+        stream_item(&ctx, "d63Zs9", name, "", 4_159_930_455, "video/x-matroska", item)
+    }
+
+    fn title_of(item: &crate::matcher::FileItem) -> String {
+        item_json(item)
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// Line 1 of `description` — the line the Nuvio app renders large.
+    fn first_line_of(item: &crate::matcher::FileItem) -> String {
+        item_json(item)
+            .get("description")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
     }
 
     #[test]
     fn stream_item_carries_a_title_a_runtime_and_a_part_marker() {
         use crate::matcher::FileItem;
 
-        // A whole file: one line, name · size · runtime · tags. Before issue #9,
-        // `title` was absent from the JSON entirely and clients that key their row
-        // label on it rendered the `name` badge alone.
-        //
-        // The runtime is INTENTIONALLY here and not only on parts — a normal file's
-        // runtime is metadata too (compare a 2.5 GB copy against a 25 GB one).
-        let title = title_of(&FileItem {
+        // A whole file: name · size · runtime · tags. The runtime is INTENTIONALLY
+        // here and not only on parts — a normal file's runtime is metadata too
+        // (compare a 2.5 GB copy against a 25 GB one).
+        let whole = FileItem {
             title: "x".into(),
             duration: 9332,
             ..Default::default()
-        });
+        };
+        let title = title_of(&whole);
         assert!(title.contains("💾 3.9 GB"), "size belongs in the title: {title}");
         assert!(title.contains("⏱ 2h 36m"), "runtime belongs in the title: {title}");
         assert!(!title.contains("Part"), "a whole file is not a part: {title}");
         assert!(!title.contains("Split"), "a whole file is not a split: {title}");
+        assert!(!first_line_of(&whole).contains('·'), "no badge on a whole file");
 
-        // A part whose ordinal is known (name carried `partNNN`).
-        let title = title_of(&FileItem {
+        // A part whose ordinal is known (name carried `partNNN`). The marker goes
+        // on the FILE-NAME line because that is the line Nuvio renders large.
+        let known = FileItem {
             title: "x".into(),
             duration: 1401,
             is_split_part: true,
             part_num: 4,
             total_parts: 7,
             ..Default::default()
-        });
-        assert!(title.contains("⏱ 23 min"), "chunk runtime: {title}");
-        assert!(title.contains("🧩 Part 4/7"), "ordinal must be shown: {title}");
+        };
+        assert!(
+            first_line_of(&known).contains("🧩 Part 4/7"),
+            "the prominent line must carry the ordinal: {}",
+            first_line_of(&known)
+        );
+        assert!(title_of(&known).contains("⏱ 23 min"), "chunk runtime");
 
         // A part detected from DURATION only — same name, no ordinal, count known.
         // "Part 0/7" would be a lie, so it states the shape instead.
-        let title = title_of(&FileItem {
+        let anonymous = FileItem {
             title: "x".into(),
             duration: 1323,
             is_split_part: true,
             total_parts: 7,
             ..Default::default()
-        });
-        assert!(title.contains("🧩 Split · 7 parts"), "split shape must be shown: {title}");
-        assert!(!title.contains("Part 0"), "never invent an ordinal: {title}");
+        };
+        assert!(first_line_of(&anonymous).contains("🧩 Split · 7 parts"));
+        assert!(!title_of(&anonymous).contains("Part 0"), "never invent an ordinal");
 
         // Detected as a chunk with NEITHER count nor position — the badge must
         // still appear (that is the whole point of the issue).
-        let title = title_of(&FileItem {
+        let unknown = FileItem {
             title: "x".into(),
             duration: 1185,
             is_split_part: true,
             ..Default::default()
-        });
-        assert!(title.contains("🧩 Split · order unknown"), "unknown order still labelled: {title}");
-        assert!(title.contains("⏱ 20 min"), "chunk runtime: {title}");
+        };
+        assert!(first_line_of(&unknown).contains("🧩 Split · order unknown"));
+        assert!(title_of(&unknown).contains("⏱ 20 min"), "chunk runtime");
 
         // An ordinal but no known total (caption carried `part005` only).
-        let title = title_of(&FileItem {
+        let single = FileItem {
             title: "x".into(),
             is_split_part: true,
             part_num: 5,
             ..Default::default()
-        });
-        assert!(title.contains("🧩 Part 5"), "single known part: {title}");
-        assert!(!title.contains("Part 5/0"), "no fake total: {title}");
+        };
+        assert!(first_line_of(&single).contains("🧩 Part 5"), "single known part");
+        assert!(!title_of(&single).contains("Part 5/0"), "no fake total");
+
+        // The pill line must NOT repeat the badge.
+        let pills = item_json(&known)
+            .get("description")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .lines()
+            .nth(1)
+            .unwrap_or("")
+            .to_string();
+        assert!(!pills.contains("🧩"), "the badge is on line 1 only: {pills}");
     }
 
     #[test]
