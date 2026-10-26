@@ -356,6 +356,20 @@ impl TelegramPool {
             let tok = token.ok_or_else(|| {
                 "No valid Telegram session. Provisioning a bot is required.".to_string()
             })?;
+            // A login IS `auth.ImportBotAuthorization`, the exact call Telegram
+            // answers with FLOOD_WAIT. While a wait is recorded the attempt cannot
+            // succeed AND pushes the wait further out (`note_flood` never shortens
+            // it), so the retry has to wait for the WAIT to expire — not for the
+            // next request. This is the one choke point every login goes through
+            // (download candidate loop, BOT_TOKENS provisioning, /api/botlogin), so
+            // the guard belongs here rather than in each caller.
+            let flood = crate::session::flood_remaining();
+            if flood > 0 {
+                return Err(format!(
+                    "bot sign-in paused: Telegram rate limit for another {}s (FLOOD_WAIT).",
+                    flood
+                ));
+            }
             // auth.importBotAuthorization, exactly what grammers sends.
             client
                 .bot_sign_in(tok, &api_hash)

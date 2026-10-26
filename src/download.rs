@@ -841,29 +841,57 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
             }
             Err(prov) => {
                 let connecting = is_guest_provision_in_progress();
+                // A recorded login flood is retryable and the client has to be told
+                // WHEN to come back: `429` + `retry_after` (the remaining wait), not
+                // a `403` that reads like "connect your bot". Logging in again before
+                // that duration ends is what extends it, so nothing here retries the
+                // login — it only reports the deadline the login has to wait for.
+                let flood = crate::session::flood_remaining();
                 let message = if connecting {
                     "Connecting guest bot in progress. Please refresh or try again in a few seconds.".to_string()
+                } else if flood > 0 {
+                    format!(
+                        "Telegram rate limit: bot login paused for another {}s. It clears by itself; playback works again after that.",
+                        flood
+                    )
                 } else {
                     prov.error
                         .clone()
                         .unwrap_or_else(|| "Telegram Bot is not connected. Please connect your bot token in Settings to stream.".to_string())
                 };
-                return json_response(
-                    if connecting { 503 } else { 403 },
-                    &serde_json::json!({
-                        "ok": 0,
-                        "message": message,
-                        // Verbatim reason from Telegram / the origin, never hidden.
-                        "error_detail": prov.error.unwrap_or_default(),
-                        "hint": if connecting {
-                            "Guest bot session is initializing. Please refresh playback shortly."
-                        } else {
-                            "Open Settings and connect your bot token."
-                        },
-                        "short_code": short_code,
-                        "bot_id": bot_id,
-                    }),
+                let status = if connecting {
+                    503
+                } else if flood > 0 {
+                    429
+                } else {
+                    403
+                };
+                let mut body = serde_json::json!({
+                    "ok": 0,
+                    "message": message,
+                    // Verbatim reason from Telegram / the origin, never hidden.
+                    "error_detail": prov.error.unwrap_or_default(),
+                    "hint": if connecting {
+                        "Guest bot session is initializing. Please refresh playback shortly."
+                    } else if flood > 0 {
+                        "Retrying the login before that wait expires only makes it longer, so wait for it to run out."
+                    } else {
+                        "Open Settings and connect your bot token."
+                    },
+                    "short_code": short_code,
+                    "bot_id": bot_id,
+                });
+                if flood > 0 {
+                    body["retry_after"] = serde_json::json!(flood);
+                }
+                record_refusal(
+                    ctx, started, status,
+                    if flood > 0 { "LOGIN_FLOOD" } else { "NO_SESSION" },
+                    &body["message"].as_str().unwrap_or("").to_string(),
+                    &short_code,
+                    serde_json::json!({"flood_remaining": flood, "connecting": connecting}),
                 );
+                return json_response(status, &body);
             }
         }
     }

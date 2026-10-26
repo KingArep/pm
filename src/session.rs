@@ -1214,8 +1214,45 @@ pub async fn auto_provision_guest(
                     &serde_json::json!({"bot_id": target, "error": e}),
                 );
                 env_err = Some(format!("bot {}: {}", target, e));
+                // STOP while a login flood is running. The next token would be
+                // another `auth.ImportBotAuthorization` inside the retry window —
+                // the one thing that makes the wait LONGER. With 7 env tokens this
+                // loop could add six doomed logins to every wait it discovered.
+                if flood_remaining() > 0 {
+                    log(
+                        "env bot token loop stopped (login flood)",
+                        &serde_json::json!({"remaining_secs": flood_remaining()}),
+                    );
+                    break;
+                }
             }
         }
+    }
+
+    // An operator that supplies `BOT_TOKENS` has already said which bots this
+    // instance may use; never lease a GUEST bot on top of that.
+    //
+    // On a PaaS this is not a nicety: `storage/` is per-instance and ephemeral, so
+    // every restart/scale event would lease another guest bot, and each lease is a
+    // fresh `auth.ImportBotAuthorization` — the measured shape of the 55-minute
+    // lockout (10 dynos x 7 env bots logging in at boot). A deploy with tokens
+    // either signs one of them in or reports why it could not.
+    if !env_bot_tokens().is_empty() {
+        let env_bots = env_bot_tokens().len();
+        log(
+            "guest bot lease skipped: BOT_TOKENS supplies the pool",
+            &serde_json::json!({"env_bots": env_bots, "pool_error": env_err.clone()}),
+        );
+        return Err(ProvisionResult::error(match env_err {
+            Some(env) => format!(
+                "None of this instance's {} configured BOT_TOKENS could sign in, and a BOT_TOKENS deploy never leases a guest bot.\n{}",
+                env_bots, env
+            ),
+            None => format!(
+                "This instance is configured from {} BOT_TOKENS, so it does not lease a guest bot.",
+                env_bots
+            ),
+        }));
     }
 
     // The origin keeps its own pool of bots and hands out the least-used one on
