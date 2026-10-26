@@ -209,6 +209,29 @@ pub fn b64u_decode(s: &str) -> Vec<u8> {
 }
 
 /// 16 random bytes, hex. One per request: the origin refuses a repeated nonce.
+/// Origin-relative time correction, in seconds.
+///
+/// The origin rejects a proof whose timestamp is more than 60 s from its own clock
+/// (that window is what makes a captured proof useless). Some devices are hours
+/// off: the test handset reported an epoch 28,804 s (8 h) behind the origin, so
+/// EVERY PM-Auth request answered `401` while the dashboard showed a healthy bot
+/// session, and playback stayed dead. Signing with corrected time fixes that
+/// without weakening the window.
+static CLOCK_OFFSET_SECS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+pub fn set_clock_offset(secs: i64) {
+    CLOCK_OFFSET_SECS.store(secs, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn clock_offset() -> i64 {
+    CLOCK_OFFSET_SECS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Local time adjusted to the origin's. Use this for anything the origin checks.
+pub fn now_corrected() -> i64 {
+    crate::storage::now() + clock_offset()
+}
+
 pub fn new_nonce() -> String {
     let mut buf = [0u8; 16];
     for b in buf.iter_mut() {
@@ -294,6 +317,36 @@ pub fn clear_auth_token() {
 ///
 /// The credential is the Ed25519 key this install generates and keeps; only the
 /// public half travels. Returns true when a token is available afterwards.
+/// Re-entrancy guard: `ensure_enrolled()` itself POSTs to the origin, which goes
+/// through `http_json_h()`, which calls back into this module. Without the guard
+/// that is unbounded recursion; with it the inner call is a cheap no-op.
+static ENROLLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Don't hammer the origin when enrolment keeps failing (offline phone, revoked
+/// install): one attempt per minute, per process.
+static LAST_ENROLL_ATTEMPT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// [`ensure_enrolled()`] for the call path: at most one attempt a minute and never
+/// re-entrant, so it is safe to call before every origin request.
+pub async fn ensure_enrolled_throttled() -> bool {
+    use std::sync::atomic::Ordering;
+    if !auth_token().is_empty() {
+        return true;
+    }
+    if ENROLLING.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let now = crate::storage::now();
+    let last = LAST_ENROLL_ATTEMPT.load(Ordering::SeqCst);
+    if last != 0 && now.saturating_sub(last) < 60 {
+        ENROLLING.store(false, Ordering::SeqCst);
+        return !auth_token().is_empty();
+    }
+    LAST_ENROLL_ATTEMPT.store(now, Ordering::SeqCst);
+    let ok = ensure_enrolled().await;
+    ENROLLING.store(false, Ordering::SeqCst);
+    ok
+}
+
 pub async fn ensure_enrolled() -> bool {
     let bot = crate::session::get_bot_id();
     if bot.is_empty() {
@@ -310,7 +363,10 @@ pub async fn ensure_enrolled() -> bool {
         ("device_id".to_string(), crate::diagnostics::get_device_id()),
         ("bot_id".to_string(), bot),
     ];
-    let resp = crate::httpc::http_json(&url, &params, "POST", 20).await;
+    // Boxed: http_json -> http_json_h -> ensure_enrolled_throttled -> here, so the
+    // future would otherwise be infinitely sized (E0733: "recursion in an async fn
+    // requires boxing").
+    let resp = Box::pin(crate::httpc::http_json(&url, &params, "POST", 20)).await;
     let ok = resp
         .get("ok")
         .map(|v| v.as_bool().unwrap_or(false) || v.as_i64().unwrap_or(0) != 0)

@@ -114,7 +114,9 @@ pub(crate) fn pm_auth_headers(method: &str, url: &str) -> Vec<(String, String)> 
     if token.is_empty() {
         return Vec::new();
     }
-    let ts = crate::storage::now();
+    // Origin-corrected: the proof's ±60 s window is checked against the ORIGIN's
+    // clock, and a device can be hours off (measured: 8 h on a CPH2581).
+    let ts = crate::credentials::now_corrected();
     let nonce = crate::credentials::new_nonce();
     // The signed endpoint must match the origin's `pm_auth_endpoint()`, which
     // takes the last segment of the matched REST route.
@@ -149,9 +151,21 @@ pub async fn http_json_h(
     timeout_secs: u64,
     headers: &[(String, String)],
 ) -> Value {
+    // PM-Auth self-heal, BEFORE the call that needs it.
+    //
+    // Boot enrolment alone is not enough on a phone: the engine is only started
+    // when the user taps Start/Restart, so an APK update or a stale process could
+    // be sitting there with no token — and a token minted on the previous boot
+    // expires after 60 minutes anyway. Measured on a CPH2581: /api/resolve-shortcode
+    // answered `{"ok":0}` forever because the resolve call carried no credential at
+    // all. This makes every origin call enrol first when it has nothing to send.
+    if crate::credentials::auth_token().is_empty() {
+        crate::credentials::ensure_enrolled_throttled().await;
+    }
+
     let mut target = url.to_string();
     let secret = get_api_secret();
-    let extra: Vec<(String, String)> = headers
+    let mut extra: Vec<(String, String)> = headers
         .iter()
         .cloned()
         .chain(crate::credentials::ticket_headers())
@@ -173,11 +187,10 @@ pub async fn http_json_h(
         body = Some(Value::Object(map).to_string());
     }
 
-    let call = |u: &str| {
+    // Headers are passed IN, so the retry below can rebuild them after a re-enrol
+    // (a closure that captured `extra` could not be used twice with new values).
+    let call = |u: &str, extra: Vec<(String, String)>, secret: String, body: Option<String>| {
         let target = u.to_string();
-        let secret = secret.clone();
-        let body = body.clone();
-        let extra = extra.clone();
         async move {
             let mut req = client()
                 .request(
@@ -214,13 +227,50 @@ pub async fn http_json_h(
         }
     };
 
-    let (mut ok, mut status, mut text, mut err) = call(&target).await;
+    let had_auth = extra.iter().any(|(k, _)| k.eq_ignore_ascii_case("X-PM-Auth"));
+    let (mut ok, mut status, mut text, mut err) =
+        call(&target, extra.clone(), secret.clone(), body.clone()).await;
+
+    // A 401 while we HOLD a token means the origin no longer accepts it: the
+    // install is unknown or revoked, the origin's signing key was regenerated, or
+    // the proof fell outside the 60 s clock window. Dropping the token and
+    // enrolling again is the only recovery — without this, a stale token wedges the
+    // install FOREVER. That is exactly what a CPH2581 did: every /resolve-file
+    // answered 401 and playback stayed dead while the UI showed a healthy session.
+    if status == 401 && had_auth {
+        log("wp 401 with a token, re-enrolling", &serde_json::json!({"url": target}));
+        // Re-learn the clock before re-signing: a skewed clock makes every proof
+        // stale, so re-enrolling alone would just mint a token we still can't use.
+        let probe = crate::session::measure_clock_offset().await;
+        if probe.ok {
+            crate::credentials::set_clock_offset(probe.offset);
+            log(
+                "pm-auth clock corrected",
+                &serde_json::json!({"offset_secs": probe.offset}),
+            );
+        }
+        crate::credentials::clear_auth_token();
+        if crate::credentials::ensure_enrolled_throttled().await {
+            extra = headers
+                .iter()
+                .cloned()
+                .chain(crate::credentials::ticket_headers())
+                .chain(pm_auth_headers(method, &target))
+                .collect();
+            let r = call(&target, extra.clone(), secret.clone(), body.clone()).await;
+            ok = r.0;
+            status = r.1;
+            text = r.2;
+            err = r.3;
+        }
+    }
+
     if !ok {
         if let Some(e) = &err {
             if is_connection_reset(e) {
                 if let Some(alt) = fallback_url(&target) {
                     log("wp request reset, retrying via fallback host", &serde_json::json!({"url": target}));
-                    let r = call(&alt).await;
+                    let r = call(&alt, extra.clone(), secret.clone(), body.clone()).await;
                     ok = r.0;
                     status = r.1;
                     text = r.2;

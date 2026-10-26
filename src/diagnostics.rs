@@ -762,17 +762,43 @@ pub async fn report_send(path: &std::path::Path) -> bool {
         "{}/report-diagnostic",
         crate::config::wp_api_base().trim_end_matches('/')
     );
-    let mut req = crate::httpc::client()
-        .post(&url)
-        .timeout(std::time::Duration::from_secs(12))
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .body(text);
-    let secret = crate::credentials::get_api_secret();
-    if !secret.is_empty() {
-        req = req.header("X-API-Secret", secret);
+    // `/report-diagnostic` is an authenticated route, so this POST has to carry the
+    // same PM-Auth proof as every other origin call — it used to send only
+    // `X-API-Secret`, which the origin now refuses, and the phone logged
+    // "diag upload rejected status=401" every two minutes while every report piled
+    // up locally. The ticket is included too: it also authorises bot-scoped routes.
+    let send = |url: String, text: String| async move {
+        let mut req = crate::httpc::client()
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(12))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .body(text);
+        let secret = crate::credentials::get_api_secret();
+        if !secret.is_empty() {
+            req = req.header("X-API-Secret", secret);
+        }
+        for (k, v) in crate::credentials::ticket_headers()
+            .into_iter()
+            .chain(crate::httpc::pm_auth_headers("POST", &url))
+        {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        req.send().await
+    };
+
+    let mut result = send(url.clone(), text.clone()).await;
+    if let Ok(r) = &result {
+        if r.status().as_u16() == 401 {
+            // Same recovery as http_json_h: a token the origin no longer accepts
+            // must be replaced, not retried.
+            crate::credentials::clear_auth_token();
+            if crate::credentials::ensure_enrolled_throttled().await {
+                result = send(url, text).await;
+            }
+        }
     }
-    match req.send().await {
+    match result {
         Ok(r) if r.status().is_success() => {
             let _ = fs::write(&marker, b"");
             true
