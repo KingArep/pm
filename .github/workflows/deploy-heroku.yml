@@ -28,8 +28,31 @@ name: Deploy to Heroku
 on:
   push:
     branches: [main]
+    # A commit that only touches CI, docs or scratch tools CANNOT change the
+    # binary, so it must not force a release build: this workflow pins
+    # `:sha-<short>`, that tag would not exist, and the "Find (or trigger)"
+    # step below would dispatch a full `release.yml` for an image identical to
+    # the previous commit's. Everything that can change the binary is
+    # deliberately absent from this list: `src/`, `public/`, `build.rs`,
+    # `Cargo.*`, `Dockerfile*`, `desktop/`.
+    paths-ignore:
+      - ".github/**"
+      - "**.md"
+      - "docs/**"
+      - "plans/**"
+      - "scripts/**"
+      - "tools/**"
+      - "tests/**"
   # Lets you re-deploy without an empty commit (Actions tab -> Run workflow).
   workflow_dispatch:
+    inputs:
+      image:
+        # Reuse a build that already exists instead of building this commit.
+        # Needed after a CI/docs-only commit (there is no image for it) and when
+        # a promotion has to be retried without touching source.
+        description: "Promote an ALREADY-published tag (e.g. sha-8ad2f40) instead of building this commit"
+        required: false
+        default: ""
 
 # Never run two deploys at once; a later push cancels an in-flight older one.
 concurrency:
@@ -103,6 +126,31 @@ jobs:
           SHA7: ${{ github.sha }}
         run: |
           set -euo pipefail
+
+          # A human pin wins, and it is the ONLY way an older image is reused.
+          # A CI/docs-only commit has no image of its own (see `paths-ignore`)
+          # and its binary is identical to the previous commit's, so rebuilding
+          # it is pure waste. The automatic path below NEVER falls back to an
+          # older image on its own — deploying something other than this commit
+          # silently is the exact "green deploy, stale app" bug this workflow
+          # exists to remove (a live app reporting `build: 0.1.0` while CI was
+          # green). Reuse therefore has to be an explicit, logged decision.
+          OVERRIDE="$(printf '%s' "${{ github.event.inputs.image }}" | tr -d '[:space:]')"
+          if [ -n "$OVERRIDE" ]; then
+            # Accept either a bare tag (`sha-8ad2f40`) or a full ref pasted
+            # from a `docker pull` line (`ghcr.io/<repo>:sha-8ad2f40`).
+            OVERRIDE="${OVERRIDE#ghcr.io/}"
+            OVERRIDE="${OVERRIDE#"${GITHUB_REPOSITORY}:"}"
+            OVERRIDE="${OVERRIDE#${IMAGE}:}"
+            if ! docker manifest inspect "${IMAGE}:${OVERRIDE}" >/dev/null 2>&1; then
+              echo "::error::${IMAGE}:${OVERRIDE} is not published in GHCR - cannot promote it"
+              exit 1
+            fi
+            echo "ref=${IMAGE}:${OVERRIDE}" >> "$GITHUB_OUTPUT"
+            echo "::notice::Promoting the already-published image ${IMAGE}:${OVERRIDE} (no build)"
+            exit 0
+          fi
+
           SHA7="$(printf '%s' "$SHA7" | cut -c1-7)"
           REF="${IMAGE}:sha-${SHA7}"
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
