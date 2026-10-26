@@ -438,19 +438,7 @@ jobs:
   docker:
     # `prepare` is required because the per-arch push below reads
     # `needs.prepare.outputs.tag`; without it those expressions resolve to empty.
-    #
-    # DELIBERATELY NOT `needs: native-build`. That job is ONE matrix, so needing
-    # it means needing its macOS legs too — and macos-14 is the scarcest runner in
-    # GitHub's hosted pool. Measured 2026-10-26: dispatch #215 sat with both macOS
-    # legs "waiting for a hosted runner" while the three Linux/Windows legs were
-    # already building, so `docker` never started, no `:sha-…` image was pushed,
-    # and `deploy-heroku.yml` had nothing to promote. The image needs one static
-    # musl binary and nothing else, and this job already runs on the same OS/arch
-    # pair as the musl legs — so it builds its own copy here. That costs one extra
-    # native build per arch and takes macOS off the image's critical path. A
-    # TAGGED release still waits for all five tarballs: `publish` keeps its
-    # `native-build` dependency.
-    needs: [prepare]
+    needs: [prepare, native-build]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -458,55 +446,20 @@ jobs:
         include:
           - runner: ubuntu-latest
             arch: amd64
-            musl_target: x86_64-unknown-linux-musl
+            artifact: container-linux-x86_64
           - runner: ubuntu-24.04-arm
             arch: arm64
-            musl_target: aarch64-unknown-linux-musl
+            artifact: container-linux-aarch64
     steps:
       - uses: actions/checkout@v5
+
+      - name: Download the prebuilt musl binary
+        uses: actions/download-artifact@v5
         with:
-          # `build.rs` stamps `git describe --tags`, so the tag list is required
-          # or the container reports a bare sha as its version.
-          fetch-depth: 0
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Add musl target (container binary)
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          # `ring` (reqwest/rustls) compiles C, so a musl libc compiler is
-          # required even though the rest of the tree is pure Rust.
-          sudo apt-get install -y -qq musl-tools
-          rustup target add "${{ matrix.musl_target }}"
-
-      - name: Build the static musl binary this image needs
-        shell: bash
-        env:
-          MUSL_TARGET: ${{ matrix.musl_target }}
-        run: |
-          set -euo pipefail
-          UPPER="$(printf '%s' "$MUSL_TARGET" | tr 'a-z-' 'A-Z_')"
-          export "CARGO_TARGET_${UPPER}_LINKER=musl-gcc"
-          export "CC_${MUSL_TARGET//-/_}=musl-gcc"
-          cargo build --release --locked --target "$MUSL_TARGET"
-
-          BIN="target/$MUSL_TARGET/release/pencarimovie-server"
-          [ -f "$BIN" ] || { echo "::error::missing $BIN"; exit 1; }
-          file "$BIN"
-          # Guard the #1 way this pipeline breaks: a glibc binary in an alpine
-          # image. Fail here, loudly, instead of at `docker run`.
-          if file "$BIN" | grep -qi "dynamically linked"; then
-            echo "::error::$BIN is dynamically linked — it cannot run in alpine"
-            exit 1
-          fi
-
-          # Dockerfile.release does `COPY dist-docker/${ARCH}/pencarimovie-server`.
-          OUT="$GITHUB_WORKSPACE/dist-docker/${{ matrix.arch }}"
-          mkdir -p "$OUT"
-          cp "$BIN" "$OUT/pencarimovie-server"
-          echo "Staged $OUT/pencarimovie-server"
+          name: ${{ matrix.artifact }}
+          # Dockerfile.release does `COPY dist-docker/${ARCH}/pencarimovie-server`,
+          # so the artifact must land at exactly that path.
+          path: dist-docker/${{ matrix.arch }}
 
       - name: Build image (COPY only — no toolchain, no source)
         env:
