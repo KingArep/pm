@@ -3266,10 +3266,14 @@ const STREAM_CACHE_TTL: i64 = 300;
 /// * `v2` — the sponsor used to be baked into the cached body, which could not be
 ///   distinguished from a body cached during a WordPress outage;
 /// * `v3` — every row carried `behaviorHints.notWebReady`, which made Stremio
-///   (web AND Android) hide all of them; those bodies must not be served for the
-///   last minutes of their TTL after the fix.
+///   (web AND Android) hide all of them;
+/// * `v4` — every row carried a `title` field that is not part of stremio-core's
+///   stream model.
+///
+/// Each of those bodies would otherwise be served for the rest of its short TTL
+/// after the fix, which is exactly long enough to look like the fix failed.
 fn stream_cache_key(item_type: &str, item_id: &str, base_url: &str) -> String {
-    format!("v3|{}|{}|{}", item_type, item_id, base_url)
+    format!("v4|{}|{}|{}", item_type, item_id, base_url)
 }
 
 /// Place the per-answer rows above a finished stream list.
@@ -3715,12 +3719,11 @@ fn stream_item(
     // line of `description` large, then the pill line — and it ignores `title`
     // entirely. So a part marker that only lives in the pills still leaves six
     // chunks looking identical on the line people actually read: it goes on the
-    // file-name line. `title` carries the same text for clients that do use it.
+    // file-name line, which is line 1 of `description`.
     let file_line = match &part {
         Some(p) => format!("{} · {}", display_name, p),
         None => display_name.clone(),
     };
-    let title_line = format!("{} · {}", file_line, spec_bits.join(" · "));
     let mut description = format!("{}\n{}", file_line, spec_bits.join(" • "));
     let flags = language_flags(&display_title, caption);
     if !flags.is_empty() {
@@ -3758,9 +3761,14 @@ fn stream_item(
     });
     let b64 = crate::fileid::base64url_encode(payload.to_string().as_bytes());
     let url = build_stream_url(&ctx.base_url, &b64, &file_name);
+    // NO `title`. stremio-core (web AND Android) parses a stream into
+    // `{ name, description, url|externalUrl|infoHash, behaviorHints }` — `title`
+    // is not part of that model, and a row carrying it was dropped while the
+    // sponsor (which never carried it) still rendered: "streams list for stremio
+    // is broken, only show sponsored message". `description` is the field every
+    // client renders, and it already carries the same text.
     serde_json::json!({
         "name": name,
-        "title": title_line,
         "description": description,
         "url": url,
         "behaviorHints": Value::Object(hints),
@@ -7465,10 +7473,63 @@ mod tests {
         stream_item(&ctx, "d63Zs9", name, "", 4_159_930_455, "video/x-matroska", item)
     }
 
-    fn title_of(item: &crate::matcher::FileItem) -> String {
+    /// HARD RULE — a `/stream` item must NEVER carry a `title` field.
+    ///
+    /// stremio-core (the engine inside the Stremio web app AND the Stremio
+    /// Android app) deserializes a stream into exactly
+    /// `{ name, description, url | externalUrl | infoHash, behaviorHints }`.
+    /// A row carrying an unknown `title` was DROPPED, so a 100-row list collapsed
+    /// to the only row without one — the sponsored item — even though the JSON
+    /// was valid addon JSON and Nuvio rendered all 100 rows. Reproduced and fixed
+    /// on 2026-10-26 (`7f76825`, then the title removal): the field was added for
+    /// issue #9 and is the single reason "streams list for stremio is broken,
+    /// only show sponsored message" happened.
+    ///
+    /// Do NOT re-add it "because issue #9 asked for a title": that text already
+    /// lives on line 1 of `description`, which every client renders, plus the
+    /// pill line. If a future client needs a second line, extend `description`.
+    #[test]
+    fn a_stream_item_never_carries_a_title_field() {
+        let item = crate::matcher::FileItem {
+            title: "Movie.2026.1080p.mkv".to_string(),
+            duration: 5400,
+            ..Default::default()
+        };
+        let j = item_json(&item);
+        let mut keys: Vec<&str> = j
+            .as_object()
+            .expect("a stream item is a JSON object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert!(
+            !keys.contains(&"title"),
+            "stremio-core DROPS any stream carrying `title` — the list then shows \
+             only the sponsored item. Keys were {keys:?}"
+        );
+        // The exact model stremio-core accepts. Anything outside it risks the
+        // same silent drop, so a new field must be a deliberate decision here.
+        assert_eq!(
+            keys,
+            vec!["behaviorHints", "description", "name", "url"],
+            "stream keys must match stremio-core's model exactly"
+        );
+        // …and the text issue #9 wanted is still there, on line 1 / line 2.
+        // (`item_json()` builds every item from the same F1 file name.)
+        assert!(first_line_of(&item).starts_with("F1.The.Movie"), "{}", first_line_of(&item));
+        assert!(pills_of(&item).contains("💾 "), "size pill missing");
+        assert!(pills_of(&item).contains("⏱ 1h 30m"), "runtime pill missing");
+    }
+
+    /// Line 2 of `description` — the pill line (size, runtime, source, codec).
+    fn pills_of(item: &crate::matcher::FileItem) -> String {
         item_json(item)
-            .get("title")
+            .get("description")
             .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .lines()
+            .nth(1)
             .unwrap_or("")
             .to_string()
     }
@@ -7512,7 +7573,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_item_carries_a_title_a_runtime_and_a_part_marker() {
+    fn stream_item_carries_a_runtime_and_a_part_marker() {
         use crate::matcher::FileItem;
 
         // A whole file: name · size · runtime · tags. The runtime is INTENTIONALLY
@@ -7523,11 +7584,11 @@ mod tests {
             duration: 9332,
             ..Default::default()
         };
-        let title = title_of(&whole);
-        assert!(title.contains("💾 3.9 GB"), "size belongs in the title: {title}");
-        assert!(title.contains("⏱ 2h 36m"), "runtime belongs in the title: {title}");
-        assert!(!title.contains("Part"), "a whole file is not a part: {title}");
-        assert!(!title.contains("Split"), "a whole file is not a split: {title}");
+        let pills = pills_of(&whole);
+        assert!(pills.contains("💾 3.9 GB"), "size belongs on the pill line: {pills}");
+        assert!(pills.contains("⏱ 2h 36m"), "runtime belongs on the pill line: {pills}");
+        assert!(!pills.contains("Part"), "a whole file is not a part: {pills}");
+        assert!(!pills.contains("Split"), "a whole file is not a split: {pills}");
         assert!(!first_line_of(&whole).contains('·'), "no badge on a whole file");
 
         // A part whose ordinal is known (name carried `partNNN`). The marker goes
@@ -7545,7 +7606,7 @@ mod tests {
             "the prominent line must carry the ordinal: {}",
             first_line_of(&known)
         );
-        assert!(title_of(&known).contains("⏱ 23 min"), "chunk runtime");
+        assert!(pills_of(&known).contains("⏱ 23 min"), "chunk runtime");
 
         // A part detected from DURATION only — same name, no ordinal, count known.
         // "Part 0/7" would be a lie, so it states the shape instead.
@@ -7557,7 +7618,7 @@ mod tests {
             ..Default::default()
         };
         assert!(first_line_of(&anonymous).contains("🧩 Split · 7 parts"));
-        assert!(!title_of(&anonymous).contains("Part 0"), "never invent an ordinal");
+        assert!(!pills_of(&anonymous).contains("Part 0"), "never invent an ordinal");
 
         // Detected as a chunk with NEITHER count nor position — the badge must
         // still appear (that is the whole point of the issue).
@@ -7568,7 +7629,7 @@ mod tests {
             ..Default::default()
         };
         assert!(first_line_of(&unknown).contains("🧩 Split · order unknown"));
-        assert!(title_of(&unknown).contains("⏱ 20 min"), "chunk runtime");
+        assert!(pills_of(&unknown).contains("⏱ 20 min"), "chunk runtime");
 
         // An ordinal but no known total (caption carried `part005` only).
         let single = FileItem {
@@ -7578,7 +7639,7 @@ mod tests {
             ..Default::default()
         };
         assert!(first_line_of(&single).contains("🧩 Part 5"), "single known part");
-        assert!(!title_of(&single).contains("Part 5/0"), "no fake total");
+        assert!(!pills_of(&single).contains("Part 5/0"), "no fake total");
 
         // The pill line must NOT repeat the badge.
         let pills = item_json(&known)
