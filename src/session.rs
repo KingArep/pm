@@ -328,6 +328,61 @@ pub fn remember_env_identity(bot_id: &str, username: &str, name: &str) {
     }));
 }
 
+/// Which bot becomes primary after a removal: one that holds a session file can
+/// serve requests immediately, a bare pool row cannot.
+///
+/// Kept separate from [`remove_pool_bot()`] so the choice is testable without a
+/// storage directory.
+fn pick_replacement<'a>(
+    pool: &'a [Value],
+    has_session: impl Fn(&str) -> bool,
+) -> Option<&'a Value> {
+    pool.iter()
+        .find(|b| {
+            b.get("bot_id")
+                .and_then(|v| v.as_str())
+                .map(&has_session)
+                .unwrap_or(false)
+        })
+        .or_else(|| pool.first())
+}
+
+/// Make `bot_id` the only entry flagged `is_active` in `bot_pool.json`.
+///
+/// [`get_bot_id()`] falls back to the first `is_active` row and the dashboard
+/// renders its "Primary" badge from it, so two rows claiming to be active made
+/// the primary depend on file order.
+fn mark_only_active(bot_id: &str) {
+    let mut pool = file_pool();
+    let mut changed = false;
+    for b in pool.iter_mut() {
+        let is_target = b.get("bot_id").and_then(|v| v.as_str()) == Some(bot_id);
+        if let Some(obj) = b.as_object_mut() {
+            let was = obj.get("is_active").and_then(|v| v.as_bool()).unwrap_or(false);
+            if was != is_target {
+                obj.insert("is_active".to_string(), Value::Bool(is_target));
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        save_bot_pool(&pool);
+    }
+}
+
+/// Remove a bot from the pool.
+///
+/// Removing the PRIMARY bot must hand the primary role to another bot that can
+/// actually log in, and removing the LAST bot must leave the instance with no
+/// session at all — the dashboard turns that into the "enter a bot token" gate.
+///
+/// It used to promote `next.first()` unconditionally. When that entry had no
+/// session file (a row that was added but never logged in, or whose session
+/// directory had already been cleaned) `/api/session` answered
+/// `has_session: false` while the pool still listed a bot, so the dashboard
+/// skipped the token gate and fell into guest provisioning — the endless
+/// "Provisioning guest bot..." spinner. Preferring a bot with a session file and
+/// clearing the identity files with the last bot keeps both paths honest.
 pub fn remove_pool_bot(bot_id: &str) -> Vec<Value> {
     let id = bot_id.trim();
     if id.is_empty() {
@@ -341,31 +396,46 @@ pub fn remove_pool_bot(bot_id: &str) -> Vec<Value> {
         .collect();
     save_bot_pool(&next);
     clear_session_directory(&crate::telegram::session_dir(id));
-    let active = get_bot_id();
-    if active == id {
-        if let Some(first) = next.first() {
-            save_session_meta(
-                first.get("bot_id").and_then(|v| v.as_str()).unwrap_or(""),
-                first.get("bot_username").and_then(|v| v.as_str()).unwrap_or(""),
-                first.get("bot_name").and_then(|v| v.as_str()).unwrap_or(""),
-            );
-        } else {
-            clear_session_meta();
-            clear_session();
-        }
-    }
     if next.is_empty() {
         let _ = fs::remove_file(bot_pool_path());
-        // With `BOT_TOKENS` set the machine still has bots, so promote the first
-        // env bot instead of leaving the instance with no active session.
-        match env_bot_tokens().first() {
-            Some(token) => {
-                let id = token.split(':').next().unwrap_or("").trim().to_string();
-                save_session_meta(&id, "", "");
+    }
+    let active = get_bot_id();
+    if active == id || active.is_empty() {
+        // A bot that holds a session file can be used immediately; a bare pool
+        // row cannot. Only fall back to the first row when nothing can log in.
+        let replacement = pick_replacement(&next, crate::telegram::has_session_file);
+        match replacement {
+            Some(bot) => {
+                let promoted = bot
+                    .get("bot_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                save_session_meta(
+                    &promoted,
+                    bot.get("bot_username").and_then(|v| v.as_str()).unwrap_or(""),
+                    bot.get("bot_name").and_then(|v| v.as_str()).unwrap_or(""),
+                );
+                mark_only_active(&promoted);
             }
             None => {
-                clear_session_meta();
-                clear_session();
+                // With `BOT_TOKENS` set the machine still has bots, so promote the
+                // first env bot instead of leaving the instance with no active
+                // session. Otherwise drop every identity file, including the
+                // legacy `bot_id.txt` cache — leaving it behind let `get_bot_id()`
+                // report the removed bot as the active one.
+                match env_bot_tokens().first() {
+                    Some(token) => {
+                        let env_id = token.split(':').next().unwrap_or("").trim().to_string();
+                        save_session_meta(&env_id, "", "");
+                    }
+                    None => {
+                        clear_session_meta();
+                        clear_session();
+                        clear_bot_id();
+                    }
+                }
             }
         }
     }
@@ -760,6 +830,35 @@ mod tests {
     #[test]
     fn one_guest_bot_per_instance_is_a_constant() {
         assert_eq!(GUEST_BOTS_PER_INSTANCE, 1);
+    }
+
+    /// Removing the primary must hand the role to a bot that can log in.
+    /// Picking the first row regardless is what sent the dashboard into the
+    /// endless "Provisioning guest bot..." spinner: `/api/session` answered
+    /// `has_session: false` while the pool still listed a bot, so the token gate
+    /// was skipped and guest provisioning took over.
+    #[test]
+    fn removal_promotes_a_bot_that_can_actually_log_in() {
+        let pool = vec![
+            serde_json::json!({"bot_id": "333", "bot_name": "never logged in"}),
+            serde_json::json!({"bot_id": "222", "bot_name": "ready"}),
+        ];
+        let picked = pick_replacement(&pool, |id| id == "222").expect("a replacement");
+        assert_eq!(picked["bot_id"], "222");
+
+        // Nothing can log in: fall back to the first row, and the UI gates.
+        let picked = pick_replacement(&pool, |_| false).expect("a replacement");
+        assert_eq!(picked["bot_id"], "333");
+
+        // An empty pool has no replacement at all.
+        assert!(pick_replacement(&[], |_| true).is_none());
+
+        // A row without a bot_id is never picked as the primary.
+        let junk = vec![
+            serde_json::json!({"bot_name": "no id"}),
+            serde_json::json!({"bot_id": "444"}),
+        ];
+        assert_eq!(pick_replacement(&junk, |_| true).unwrap()["bot_id"], "444");
     }
 
     /// Telegram renders the login wait in several shapes, and a missed parse means

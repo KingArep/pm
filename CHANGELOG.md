@@ -6,6 +6,30 @@ All notable changes to the PencariMovie Server / Downloader project will be docu
 
 ### Fixed
 
+- **Removing the primary bot no longer ends in an endless "Provisioning guest
+  bot..." spinner.** The Bot Pool trash button always re-ran the session check,
+  so removing the last bot dropped the dashboard into guest provisioning — and a
+  provision that FAILED only recorded `provisionError` and returned, leaving the
+  full-page loading screen up with no token field anywhere. Three changes:
+  - [`remove_pool_bot()`](src/session.rs:1) now promotes a bot that actually
+    holds a session file (`pick_replacement()`), not merely `pool.first()`; a row
+    that was added but never logged in produced `has_session: false` while the
+    pool still listed a bot, which skipped the gate. Removing the LAST bot also
+    clears `bot_id.txt`, so the removed identity cannot come back as "active".
+  - `/api/bots/remove` answers `has_session` and `bots_remaining`
+    ([`src/routes.rs`](src/routes.rs:1)), so the dashboard can tell "the primary
+    switched to another bot" from "show the token gate" without guessing. The
+    response is the ONLY thing that changes: automatic guest provisioning stays
+    on everywhere else (a refresh, `/manifest.json` clients and the addon keep
+    leasing a guest bot exactly as before).
+  - [`public/app.js`](public/app.js:1): the remove click that empties the pool (or
+    leaves only an unusable row) opens the bot-token gate exactly like
+    **Disconnect All**, and a failed auto-provision falls through to that gate
+    with the engine's reason instead of leaving the spinner on screen. Pinned by
+    `tools/probe_remove_primary.mjs` (real binary over a throwaway
+    `PM_APP_ROOT`, plus `public/app.js` driven in a vm) and by
+    `session::tests::removal_promotes_a_bot_that_can_actually_log_in`.
+
 - **The Heroku deploy can push the image again** (`error from registry:
 unsupported`). [`deploy-heroku.yml`](.github/workflows/deploy-heroku.yml:1)
   promoted `:sha-<7>` with `docker pull` → `docker push`, but that tag is a

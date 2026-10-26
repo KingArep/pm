@@ -2392,16 +2392,48 @@ class PencariMovieApp {
             const targetId = btn.getAttribute("data-bot-id");
             if (!targetId || !confirm("Remove this bot from pool?")) return;
             try {
-              yield this.requestJson("".concat(this.localApiBase, "/api/bots/remove"), {
+              const resp = yield this.requestJson("".concat(this.localApiBase, "/api/bots/remove"), {
                 method: "POST",
                 body: JSON.stringify({
                   bot_id: targetId
                 })
               });
+              const remaining = Array.isArray(resp == null ? void 0 : resp.pool) ? resp.pool : [];
+              // The engine promotes a replacement and answers `has_session` for
+              // it: true means the primary really switched to a bot it can log
+              // in with. `false` (or an empty pool) has to end on the bot-token
+              // gate, exactly like "Disconnect All" — asking /api/session here
+              // sent the app into guest provisioning, and when the origin had no
+              // bot to lease the full-page "Provisioning guest bot..." spinner
+              // stayed up forever. `has_session` is absent on older engines, which
+              // keep the old refresh path.
+              const answeredSession = resp != null && Object.prototype.hasOwnProperty.call(resp, "has_session");
+              const switched = !answeredSession || resp.has_session === true;
+              if (remaining.length === 0 || !switched) {
+                this.hasSession = false;
+                this._clearCachedSession();
+                this._hideLoadingScreen();
+                this.updateBotBadge();
+                this.showSettingsGate({
+                  forceToken: true,
+                  message: remaining.length === 0 ? "All bots were removed. Enter a Telegram bot token to connect a new primary bot." : "The remaining bot could not be activated. Enter its token again.",
+                  messageType: "error"
+                });
+                yield this.loadBotPool();
+                return;
+              }
               yield this.loadSessionStatus();
               yield this.loadBotPool();
             } catch (e) {
               console.error("Failed to remove bot:", e);
+              if (!this.hasSession) {
+                this._hideLoadingScreen();
+                this.showSettingsGate({
+                  forceToken: true,
+                  message: (e == null ? void 0 : e.message) || "Failed to remove the bot.",
+                  messageType: "error"
+                });
+              }
             }
           }));
         });
@@ -2472,6 +2504,8 @@ class PencariMovieApp {
             }
           }), 2500);
         } else if (data && data.ok === 1) {
+          // A reload (or a fresh install) still auto-provisions a guest bot: only
+          // the click that empties the pool lands on the token gate.
           this._showLoadingScreen("Provisioning guest bot...");
           try {
             const clock = yield this.requestJson("".concat(this.localApiBase, "/api/clock-check"));
@@ -2515,7 +2549,17 @@ class PencariMovieApp {
             const errMsg = (provErr == null ? void 0 : provErr.message) || "";
             this.provisionError = errMsg || "Auto-connect unavailable. Please enter your Telegram bot token.";
           }
+          // A failed auto-provision must EXIT the loading screen. It used to just
+          // record `provisionError` and return, which left the full-page
+          // "Provisioning guest bot..." spinner on screen forever with no way to
+          // enter a token.
           this._clearCachedSession();
+          this._hideLoadingScreen();
+          this.showSettingsGate({
+            forceToken: true,
+            message: this.provisionError,
+            messageType: "error"
+          });
         }
       } catch (error) {
         console.warn("Session check failed:", error);

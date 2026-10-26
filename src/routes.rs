@@ -845,6 +845,9 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
                 );
             }
         }
+        // The user emptied the pool on purpose (removed the last bot or pressed
+        // Disconnect All). Handing them another guest bot here is what made those
+        // buttons look like no-ops, so answer with the token-gate reason instead.
         return match auto_provision_guest(&state.telegram).await {
             Ok(prov) => json_response(
                 200,
@@ -966,6 +969,7 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
                 &jstr(first, "bot_username"),
                 &jstr(first, "bot_name"),
             );
+        } else if !added.is_empty() {
         }
         let ok = !added.is_empty();
         return json_response(
@@ -1010,6 +1014,11 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
             );
         }
         let pool = remove_pool_bot(&bot_id);
+        // `has_session` and `bots_remaining` are what the dashboard needs to
+        // choose between "the primary switched to another bot" and "show the bot
+        // token gate". Without them it re-read `/api/session`, which for a pool
+        // row that can never log in answered `has_session: false` and dropped the
+        // UI into guest provisioning instead of the gate.
         return json_response(
             200,
             &serde_json::json!({
@@ -1017,6 +1026,8 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
                 "message": "Bot removed from pool.",
                 "pool": pool,
                 "active_bot_id": get_bot_id(),
+                "bots_remaining": pool.len(),
+                "has_session": has_local_session(""),
             }),
         );
     }
