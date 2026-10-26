@@ -36,6 +36,39 @@ use symphonia::core::units::{Time, TimeBase};
 /// Size of the canonical PCM WAV header this module emits.
 pub const WAV_HEADER_LEN: u64 = 44;
 
+/// Which audio codec an MP4/M4A announces, from the bytes we already hold.
+///
+/// Why this exists: symphonia only names the codec AFTER it has read the `moov`
+/// box, and its error is a bare `CodecType(n)`. Measured on a CPH2581:
+/// `no decoder for codec CodecType(4100)` — `4100` is `0x1004`, which is **AAC**
+/// (`symphonia_core::codecs::CODEC_TYPE_AAC`); ALAC is `0x2003`. Symphonia 0.5
+/// has **no AAC decoder at all**, so an AAC `.m4a` could never be transcoded —
+/// yet [`crate::download`] pulled the WHOLE track (8-25 MB) from Telegram before
+/// the probe said so, on the first play of every such file.
+///
+/// The first `stsd` sample entry names the codec (`alac`, `mp4a` = AAC/MP4 audio,
+/// …). Works on a prefix of the file, so the answer arrives after the first 1 MB
+/// chunk. `None` means "cannot tell yet" — the caller keeps its old behaviour.
+pub fn mp4_audio_fourcc(data: &[u8]) -> Option<&'static str> {
+    // `at` is the 's' of the tag, so the box header is behind us. Then:
+    //   [at+4,  at+8)  version + flags
+    //   [at+8,  at+12) entry_count
+    //   [at+12, at+16) first sample entry size
+    //   [at+16, at+20) first sample entry fourcc
+    let needle = b"stsd";
+    let at = data.windows(needle.len()).position(|w| w == needle)?;
+    let fourcc = data.get(at + 16..at + 20)?;
+    match fourcc {
+        b"alac" => Some("alac"),
+        b"mp4a" => Some("mp4a"),
+        b"ac-3" => Some("ac-3"),
+        b"ec-3" => Some("ec-3"),
+        b"Opus" | b"opus" => Some("opus"),
+        b"fLaC" | b"flac" => Some("flac"),
+        _ => None,
+    }
+}
+
 /// What the WAV header (and the byte↔frame mapping) needs to know about the
 /// decoded stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,6 +493,45 @@ mod tests {
 
     fn u32_at(h: &[u8; 44], at: usize) -> u32 {
         u32::from_le_bytes([h[at], h[at + 1], h[at + 2], h[at + 3]])
+    }
+
+    /// A minimal `stsd` box. The first sample entry's fourcc is what separates
+    /// ALAC (0x2003, decodable here) from AAC (0x1004, which symphonia 0.5 has
+    /// no decoder for — the `CodecType(4100)` in the device log).
+    fn stsd_with(fourcc: &[u8; 4]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&[0, 0, 0, 0x30]); // box size
+        v.extend_from_slice(b"stsd"); // <- the tag `mp4_audio_fourcc` finds
+        v.extend_from_slice(&[0, 0, 0, 0]); // version + flags
+        v.extend_from_slice(&[0, 0, 0, 1]); // entry count
+        v.extend_from_slice(&[0, 0, 0, 0x24]); // first sample entry size
+        v.extend_from_slice(fourcc); // sample entry format
+        v.extend_from_slice(&[0; 8]);
+        v
+    }
+
+    #[test]
+    fn mp4_codec_is_read_from_the_first_sample_entry() {
+        assert_eq!(mp4_audio_fourcc(&stsd_with(b"alac")), Some("alac"));
+        assert_eq!(mp4_audio_fourcc(&stsd_with(b"mp4a")), Some("mp4a"));
+        assert_eq!(mp4_audio_fourcc(&stsd_with(b"ac-3")), Some("ac-3"));
+        assert_eq!(mp4_audio_fourcc(&stsd_with(b"ec-3")), Some("ec-3"));
+        assert_eq!(mp4_audio_fourcc(&stsd_with(b"Opus")), Some("opus"));
+    }
+
+    /// Nothing to decide from yet (`moov` at the end of the file, or a bare
+    /// `ftyp`) must answer "unknown" — never a wrong codec — so the caller keeps
+    /// its old pull-the-whole-file behaviour instead of skipping a real ALAC.
+    #[test]
+    fn mp4_codec_is_unknown_without_a_sample_entry() {
+        assert_eq!(mp4_audio_fourcc(b""), None);
+        assert_eq!(
+            mp4_audio_fourcc(b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00moov"),
+            None
+        );
+        let mut short = stsd_with(b"alac");
+        short.truncate(18); // tag + version/flags + entry count, fourcc not yet read
+        assert_eq!(mp4_audio_fourcc(&short), None);
     }
 
     #[test]

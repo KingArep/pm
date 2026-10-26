@@ -6261,7 +6261,18 @@ async fn eclipse_search(query: &str, limit: usize) -> Vec<Value> {
         limit,
         crate::storage::now()
     );
-    let res = crate::httpc::http_json(&url, &[], "GET", 15).await;
+    let mut res = crate::httpc::http_json(&url, &[], "GET", 15).await;
+    if res.is_null() {
+        // ONE retry, because a transport blip used to reach the user as "no
+        // tracks at all". Measured on a CPH2581: two consecutive
+        // `/search-music?search=wildflower` calls logged
+        // `http_json failed {"error":"error sending request"}` and the addon
+        // answered `{"tracks":[]}`; the very next call for the same query
+        // returned 39 rows. The client paints an empty list on that, and the
+        // user reads it as "the song is not there".
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        res = crate::httpc::http_json(&url, &[], "GET", 15).await;
+    }
     let rows = if let Some(arr) = res.as_array() {
         arr.clone()
     } else {
@@ -6272,12 +6283,21 @@ async fn eclipse_search(query: &str, limit: usize) -> Vec<Value> {
             .cloned()
             .unwrap_or_default()
     };
-    let mut tracks: Vec<Value> = rows
+    let tracks: Vec<Value> = rows
         .iter()
         .filter(|r| !str_at(r, "short_code").is_empty())
         .map(crate::eclipse::format_track)
         .collect();
-    // Best audio first, then the longest — the addon's own ordering.
+    // The ORIGIN'S ORDER IS THE RANKING — do not re-sort here.
+    //
+    // This used to sort by `quality_score(format, duration)`, which silently
+    // overrode the origin's size-first ranking (with a rip-title penalty). That
+    // is why the phone listed `05.WILDFLOWER.flac` (47.3 MB) ABOVE
+    // `05.WILDFLOWER.m4a` (48.9 MB): same album, the bigger file was demoted
+    // because the other one is FLAC. The track shape this route returns carries
+    // no size at all, so the engine has nothing to rank by — it can only
+    // preserve or destroy the origin's order, and destroying it was the bug.
+    //
     // One line per query: "the client found nothing to play" and "we answered
     // nothing" look identical from the player, so log both sides.
     log(
@@ -6289,17 +6309,6 @@ async fn eclipse_search(query: &str, limit: usize) -> Vec<Value> {
             "tracks": tracks.len(),
         }),
     );
-    tracks.sort_by(|a, b| {
-        let ka = crate::eclipse::quality_score(
-            a["format"].as_str().unwrap_or(""),
-            a["duration"].as_i64().unwrap_or(0) as u64,
-        );
-        let kb = crate::eclipse::quality_score(
-            b["format"].as_str().unwrap_or(""),
-            b["duration"].as_i64().unwrap_or(0) as u64,
-        );
-        kb.cmp(&ka)
-    });
     tracks
 }
 

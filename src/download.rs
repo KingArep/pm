@@ -761,8 +761,15 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
             // therefore only trusted while it is minutes old; anything older — or
             // any entry saved by an older build, which has neither stamp — is
             // refreshed BEFORE the first byte instead of after a failed one.
+            // Two windows, not one 3000 s window: a Telegram `file_reference`
+            // dies well inside an hour, so a 50-minute "fresh enough" test let a
+            // dead reference start a Play and answer 400 on the first chunk —
+            // measured on the phone (`F2tdzm`, `pVid3z`, `q8RbRv`). A PROVEN id
+            // gets 20 minutes; one that was never fetched yet (prewarm output)
+            // gets 10, because nobody has checked it.
             let stamped = if verified > 0 { verified } else { resolved };
-            let fresh_enough = stamped > 0 && now() - stamped < 3000;
+            let window = if verified > 0 { 1200 } else { 600 };
+            let fresh_enough = stamped > 0 && now() - stamped < window;
             if !cached_id.is_empty() && !(fresh_enough && same_bot) {
                 // Drop it, or the resolve below hands the same dead reference
                 // straight back and the Play fails on the first byte.
@@ -1209,10 +1216,59 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
     let alac_key = format!("{}:{}", short_code, file_mime);
     let alac_skipped = !short_code.is_empty()
         && crate::cache::get("alac_skip", &alac_key).is_some();
-    if is_alac_target(&file_name, &file_mime) && !alac_skipped {
+    // RAW BY DEFAULT. `.m4a` is ambiguous — it carries AAC (which Android plays
+    // natively) as often as ALAC (which it cannot) — and the only way to tell is
+    // the `stsd` fourcc, which on these files sits in a `moov` box at the END.
+    // Deciding that way meant pulling the WHOLE track before answering byte 0:
+    // measured 22.4 s for a 7 MB `.m4a` (13.4 s for 8.2 MB), and the player gives
+    // up around 20 s, so the track was skipped. The probe below reads a small head
+    // window and, failing that, a 1 MB tail window — cheap enough to decide first.
+    // Only a confirmed `alac` pays for the transcode.
+    // REVERTED: making the warm-up unconditional made things WORSE, not better —
+    // `WILDFLOWER.m4a` went from "no-Range completes in 6.8 s, ranges stall" to
+    // "all three stall", so the extra fetch is not the cure. The real fault is
+    // below this branch: once a ranged download stalls inside `fetch_range_gated`
+    // for a file, that bot's download path stays wedged and later requests never
+    // proceed either (restart clears it). Do not re-add a fetch here without a
+    // hard timeout on that call and proof the slot permit is released.
+    // A decoded WAV already on disk IS the verdict — do not probe again.
+    //
+    // Measured on a CPH2581: `kuMkZf` (48.9 MB ALAC) had a warm WAV cache, the
+    // probe still ran, read a SHORT head window, concluded "unknown" and served
+    // the raw ALAC bytes as `audio/mp4` — so the player reported an unplayable
+    // track while a perfectly good WAV sat in the cache. The very next request
+    // found `alac` in the same 1 MB window. The cache also removes a network
+    // round-trip from every Range request, so a seek costs a disk read only.
+    let alac_cached = alac_wav_path(&short_code)
+        .and_then(|p| std::fs::metadata(&p).ok())
+        .map(|m| m.len() > crate::audio::WAV_HEADER_LEN)
+        .unwrap_or(false);
+    let alac_confirmed = is_alac_target(&file_name, &file_mime)
+        && !alac_skipped
+        && (alac_cached || {
+            let (probe_client, probe_gate) = entry.pick_slot();
+            probe_codec(&probe_client, probe_gate.as_ref(), &target, file_size, &short_code).await
+                == Some("alac")
+        });
+    if alac_confirmed {
         let (alac_client, alac_gate) = entry.pick_slot();
         let head_only = ctx.method.eq_ignore_ascii_case("HEAD");
+        // BACKGROUND WARM-UP: REMOVED. It answered 503 + Retry-After 5 while the
+        // transcode ran detached, and on `L5vw9B` (48.9 MB) it produced 13
+        // consecutive 503s over 78 s with no recovery — the detached task never
+        // materialised the WAV, so every retry re-armed another 503. A retry loop
+        // that never converges is worse than a slow first request. Do not bring it
+        // back without: a log line from the background task on both success and
+        // failure, a bounded number of warm attempts per short_code, and a test
+        // that a cold cache actually becomes ready.
         let mut undecodable = false;
+        // Kept ACROSS the retry: a fresh `file_reference` names the same file, so
+        // the bytes already pulled stay valid and the second attempt resumes
+        // where the first stopped. Restarting from zero meant two full pulls of an
+        // 8 MB track, which is longer than the player waits — the phone skipped
+        // the track instead of playing it.
+        let mut alac_data: Vec<u8> = Vec::new();
+        let mut alac_pos: u64 = 0;
         if let Some(resp) = serve_alac(
             &alac_client,
             alac_gate.as_ref(),
@@ -1223,6 +1279,8 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
             &short_code,
             head_only,
             &mut undecodable,
+            &mut alac_data,
+            &mut alac_pos,
         )
         .await
         {
@@ -1258,6 +1316,8 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
                         &short_code,
                         head_only,
                         &mut retry_undecodable,
+                        &mut alac_data,
+                        &mut alac_pos,
                     )
                     .await
                     {
@@ -1842,8 +1902,110 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
 /// A **video** MP4 must never be routed into the audio decoder, so a `video/*`
 /// mime only qualifies when the file is explicitly named `.m4a`/`.alac`; the
 /// `audio/` family check is what keeps `<video>` playback on the byte-for-byte
-/// path. `audio::probe()` still has the final say: an AAC `.m4a` has no decoder
-/// in this build, so it falls through and streams raw exactly as before.
+/// path.
+///
+/// This is only a NAME test, and `.m4a` is ambiguous: the same extension carries
+/// **AAC**, which symphonia 0.5 cannot decode at all (`CodecType(0x1004)`, i.e.
+/// the `CodecType(4100)` the Android build reported). The decodable and
+/// undecodable cases are separated by [`crate::audio::mp4_audio_fourcc`] on the
+/// first chunk of the pull — see [`serve_alac`] — and anything it cannot decide
+/// falls through to the raw byte-for-byte download, which is what a client that
+/// plays AAC natively wants anyway.
+/// Which codec an MP4/M4A really carries, from cheap windows only.
+///
+/// `mp4_audio_fourcc` needs the `stsd` box. Faststart files keep it in the first
+/// chunk; the ones that reached the phone keep `moov` at the end, so the head
+/// window cannot see it. Fetching the TAIL is the difference between a 1 MB read
+/// and pulling the whole track — the whole track is 13–22 s on a 7–8 MB file, over
+/// the player's patience, and the track gets skipped.
+///
+/// `None` means "still unknown" and the caller serves the RAW file, which is what
+/// every client that decodes AAC itself wants anyway.
+async fn probe_codec(
+    client: &grammers_client::Client,
+    gate: &tokio::sync::Semaphore,
+    target: &DocTarget,
+    file_size: u64,
+    short_code: &str,
+) -> Option<&'static str> {
+    use crate::telegram::MB;
+    if file_size == 0 {
+        return None;
+    }
+    // A SHORT read is not an answer. The `stsd` can sit anywhere in the first
+    // MB, so a 100 KB slice of it looks exactly like "no fourcc here". Measured
+    // on a CPH2581: the first request for `kuMkZf` got a short head window,
+    // concluded "unknown" and served RAW ALAC labelled `audio/mp4` — the player
+    // cannot decode that, so the track "did not play", while the very next
+    // request found `alac` in the same 1 MB window. Retry once before believing
+    // a short read, and log the failure so "unknown" is never silent again.
+    let head_want = file_size.min(MB);
+    for attempt in 1..=2u32 {
+        match crate::telegram::fetch_range_gated(client, gate, target, 0, head_want).await {
+            Ok(head) => {
+                if let Some(codec) = crate::audio::mp4_audio_fourcc(&head) {
+                    log(
+                        "codec from the head window",
+                        &serde_json::json!({"codec": codec, "short_code": short_code, "bytes": head.len()}),
+                    );
+                    return Some(codec);
+                }
+                if head.len() as u64 >= head_want {
+                    break;
+                }
+                log(
+                    "codec probe read a short head window, retrying",
+                    &serde_json::json!({
+                        "attempt": attempt,
+                        "want": head_want,
+                        "got": head.len(),
+                        "short_code": short_code,
+                    }),
+                );
+            }
+            Err(e) => log(
+                "codec probe head fetch failed",
+                &serde_json::json!({
+                    "attempt": attempt,
+                    "error": e.message,
+                    "short_code": short_code,
+                }),
+            ),
+        }
+    }
+    // `moov` at the end: one tail read instead of the whole file. 4 MB, not 2:
+    // measured on a 10 MB and a 107 MB `.m4a`, a 2 MB tail still missed the
+    // `stsd` and the codec stayed unknown (served raw — right answer only if the
+    // track is AAC). A `moov` with several tracks is easily larger than 2 MB.
+    //
+    // The old guard was `file_size > 5 MB`, so a 4.8 MB track skipped the tail
+    // entirely and logged "unknown" after reading only the head — the exact size
+    // range most music falls in. Read the tail whenever the head did not answer,
+    // and never re-read bytes the head already covered.
+    if file_size > head_want {
+        let want = (file_size - head_want).min(4 * MB);
+        let from = file_size - want;
+        if let Ok(tail) = crate::telegram::fetch_range_gated(client, gate, target, from, want).await
+        {
+            if let Some(codec) = crate::audio::mp4_audio_fourcc(&tail) {
+                log(
+                    "codec from the tail window",
+                    &serde_json::json!({
+                        "codec": codec, "short_code": short_code, "bytes": tail.len(),
+                        "from": from,
+                    }),
+                );
+                return Some(codec);
+            }
+        }
+    }
+    log(
+        "codec unknown after the head and tail windows, serving raw",
+        &serde_json::json!({"short_code": short_code, "file_size": file_size}),
+    );
+    None
+}
+
 pub fn is_alac_target(file_name: &str, mime: &str) -> bool {
     let name = file_name.to_ascii_lowercase();
     if name.ends_with(".m4a") || name.ends_with(".alac") {
@@ -1867,6 +2029,52 @@ fn replace_ext(name: &str, ext: &str) -> String {
 ///
 /// Returns `None` when the file turns out not to be decodable (probe or fetch
 /// failure) so the caller can run the ordinary download unchanged.
+/// Write the complete decoded WAV (header + all PCM) to `path`, decoding the ALAC
+/// source in bounded windows.
+///
+/// Windows matter: a 49 MB ALAC is ~150 MB of PCM, and building that as one `Vec`
+/// before writing risks the process being killed on a phone. `decode_range` gives
+/// random access, so 4 MB slices are enough, and the file is what every later
+/// Range request is served from.
+fn write_wav_cache(
+    path: &std::path::Path,
+    wav: &[u8],
+    m4a: &[u8],
+    pcm_total: u64,
+) -> bool {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut file = match std::fs::File::create(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    if file.write_all(wav).is_err() {
+        return false;
+    }
+    const WINDOW: u64 = 4 * crate::telegram::MB;
+    let mut done = 0u64;
+    while done < pcm_total {
+        let want = WINDOW.min(pcm_total - done);
+        let chunk = crate::audio::decode_range(m4a, done, want as usize);
+        if chunk.is_empty() {
+            // Leave no half-written file behind: the next request must retry the
+            // decode instead of serving a truncated WAV.
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return false;
+        }
+        if file.write_all(&chunk).is_err() {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return false;
+        }
+        done += chunk.len() as u64;
+    }
+    true
+}
+
 async fn serve_alac(
     client: &grammers_client::Client,
     gate: &tokio::sync::Semaphore,
@@ -1877,6 +2085,11 @@ async fn serve_alac(
     short_code: &str,
     head_only: bool,
     undecodable: &mut bool,
+    // The bytes pulled so far and how far they reach. Owned by the CALLER so the
+    // retry after a dead `file_reference` RESUMES instead of pulling the whole
+    // track again — two full pulls is what made the phone skip audio tracks.
+    data: &mut Vec<u8>,
+    pos: &mut u64,
 ) -> Option<Response> {
     // Fast path: a WAV this track already produced on an earlier request.
     //
@@ -1896,14 +2109,38 @@ async fn serve_alac(
         }
     }
 
-    let mut data: Vec<u8> = Vec::with_capacity(file_size.min(64 * crate::telegram::MB) as usize);
-    let mut pos = 0u64;
-    while pos < file_size {
-        let want = (file_size - pos).min(crate::telegram::MB);
-        match crate::telegram::fetch_range_gated(client, gate, target, pos, want).await {
+    if data.is_empty() {
+        data.reserve(file_size.min(64 * crate::telegram::MB) as usize);
+    }
+    while *pos < file_size {
+        let want = (file_size - *pos).min(crate::telegram::MB);
+        match crate::telegram::fetch_range_gated(client, gate, target, *pos, want).await {
             Ok(chunk) if !chunk.is_empty() => {
-                pos += chunk.len() as u64;
+                *pos += chunk.len() as u64;
                 data.extend_from_slice(&chunk);
+                // Stop pulling the moment the container says the track is not
+                // ALAC-decodable. Measured on a CPH2581: an AAC `.m4a` reported
+                // `no decoder for codec CodecType(4100)` (4100 = 0x1004 = AAC;
+                // symphonia 0.5 has no AAC decoder) AFTER the whole 8 MB track
+                // had been pulled — on the first play of every such file. The
+                // raw bytes are what the client should get, and they are served
+                // by the ordinary download as soon as this returns None.
+                if let Some(codec) = crate::audio::mp4_audio_fourcc(data) {
+                    if matches!(codec, "mp4a" | "ac-3" | "ec-3" | "opus") {
+                        *undecodable = true;
+                        log(
+                            "alac skipped: the container is not ALAC, serving raw",
+                            &serde_json::json!({
+                                "codec": codec,
+                                "pulled": *pos,
+                                "file_size": file_size,
+                                "file_name": file_name,
+                                "short_code": short_code,
+                            }),
+                        );
+                        return None;
+                    }
+                }
             }
             Ok(_) => break,
             Err(e) => {
@@ -1911,7 +2148,7 @@ async fn serve_alac(
                     "alac fetch failed, falling back to the raw download",
                     &serde_json::json!({
                         "error": e.message,
-                        "pos": pos,
+                        "pos": *pos,
                         "file_size": file_size,
                         "short_code": short_code,
                     }),
@@ -1920,14 +2157,14 @@ async fn serve_alac(
             }
         }
     }
-    if pos < file_size {
+    if *pos < file_size {
         log(
             "alac fetch incomplete, falling back to the raw download",
-            &serde_json::json!({"have": pos, "file_size": file_size, "short_code": short_code}),
+            &serde_json::json!({"have": *pos, "file_size": file_size, "short_code": short_code}),
         );
         return None;
     }
-    let info = match crate::audio::probe_why(&data) {
+    let info = match crate::audio::probe_why(data) {
         Ok(info) => info,
         Err(why) => {
             // Not ALAC (an AAC `.m4a`, or a container with no decoder): the raw
@@ -1949,6 +2186,50 @@ async fn serve_alac(
     let pcm_total = info.pcm_bytes();
     let total = info.total_bytes();
     let wav = crate::audio::wav_header(pcm_total, info.sample_rate, info.channels);
+
+    // Materialise the WAV **once**, then answer every request — ranged or not —
+    // from the file.
+    //
+    // The old code only cached a whole-stream body (`start == 0 && body.len() ==
+    // total`), and a real player asks with a Range: measured on the phone,
+    // `bytes=2765392-48959533` for a 48,959,534 B ALAC. So the cache never filled,
+    // every seek re-pulled 49 MB from Telegram and re-decoded it to ~150 MB of PCM,
+    // and the track never played — two `codec … alac` probes 4 s apart prove the
+    // per-request cost. Written in 4 MB decode windows so peak RAM stays flat.
+    if let Some(path) = alac_wav_path(short_code) {
+        let already = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if already <= crate::audio::WAV_HEADER_LEN {
+            if write_wav_cache(&path, &wav, data.as_slice(), pcm_total) {
+                log(
+                    "alac wav cached - later ranges are a disk read",
+                    &serde_json::json!({
+                        "short_code": short_code,
+                        "pcm_bytes": pcm_total,
+                        "wav_bytes": total,
+                    }),
+                );
+            } else {
+                log(
+                    "alac wav cache write failed - serving from memory",
+                    &serde_json::json!({"short_code": short_code, "pcm_bytes": pcm_total}),
+                );
+            }
+        }
+        if let Ok(cached_total) = std::fs::metadata(&path).map(|m| m.len()) {
+            if cached_total > crate::audio::WAV_HEADER_LEN {
+                if let Some(resp) = alac_serve_cached(
+                    &path,
+                    cached_total,
+                    file_name,
+                    range_header,
+                    head_only,
+                    short_code,
+                ) {
+                    return Some(resp);
+                }
+            }
+        }
+    }
 
     // A Range addresses the WAV stream, header included: bytes [44, 44 + pcm)
     // are samples, so the first sample frame starts at 44.
@@ -1990,7 +2271,7 @@ async fn serve_alac(
         if cursor <= end {
             let from_pcm = cursor - crate::audio::WAV_HEADER_LEN;
             let want = (end - cursor + 1) as usize;
-            let pcm = crate::audio::decode_range(&data, from_pcm, want);
+            let pcm = crate::audio::decode_range(data, from_pcm, want);
             if pcm.is_empty() {
                 log(
                     "alac decode produced no samples",
