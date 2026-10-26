@@ -264,6 +264,26 @@ pub fn get_bot_pool() -> Vec<Value> {
     pool
 }
 
+/// The pool as WORK selection must see it: only bots this instance can actually
+/// stream with.
+///
+/// [`get_bot_pool()`] is the display/administration view — a bot that is listed
+/// but has never logged in HERE still belongs in it, or the dashboard could not
+/// offer it and `remove_pool_bot()` could not find it. It must never be the
+/// download view: a bot with no session file cannot fetch a byte, and while a
+/// login `FLOOD_WAIT` is recorded it cannot even be logged in. Picking one
+/// therefore guarantees a doomed `boot()` that RE-ARMS the wait — measured live:
+/// `retry_after: 2421`, because the login attempt itself was the flood.
+pub fn pool_ready() -> Vec<Value> {
+    get_bot_pool()
+        .into_iter()
+        .filter(|b| {
+            let id = b.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
+            !id.is_empty() && crate::telegram::has_session_file(id)
+        })
+        .collect()
+}
+
 pub fn save_bot_pool(pool: &[Value]) {
     let body = serde_json::to_string_pretty(&Value::Array(pool.to_vec()))
         .unwrap_or_else(|_| "[]".to_string());
@@ -485,7 +505,12 @@ pub fn pick_pool_bot() -> Option<Value> {
         return Some(picked.clone());
     }
 
-    if !active.is_empty() {
+    // The fallback used to hand back the active bot unconditionally, i.e. a bot
+    // that has never logged in on this instance was returned as if it could
+    // stream — and every caller then paid a login attempt for it. `filter_and_pick`
+    // above already requires a session file; the fallback has to agree, or it
+    // silently undoes the filter whenever the pool is empty or fully gated.
+    if !active.is_empty() && crate::telegram::has_session_file(&active) {
         let meta = load_session_meta();
         return Some(serde_json::json!({
             "bot_id": active,

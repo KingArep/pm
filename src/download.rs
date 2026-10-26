@@ -38,8 +38,8 @@ use crate::resolve::{
     resolve_shortcode_concurrent, resolve_shortcode_fresh, save_resolve_cache,
 };
 use crate::session::{
-    auto_provision_guest, get_bot_id, get_bot_pool, has_local_session,
-    is_guest_provision_in_progress, pick_pool_bot,
+    auto_provision_guest, get_bot_id, has_local_session, is_guest_provision_in_progress,
+    pick_pool_bot,
 };
 use crate::storage::now;
 use std::sync::OnceLock;
@@ -604,7 +604,10 @@ pub fn plan_download_candidates(
     let mut candidates: Vec<String> = Vec::new();
     if !bot_bound && !short_code.is_empty() {
         if let Some(id) = picked_bot_id {
-            if !id.is_empty() {
+            // Enforced here and not only in `pick_pool_bot()`: a suggestion that
+            // cannot serve must never become candidate #1, because `chosen_bot`
+            // takes the head of this list.
+            if !id.is_empty() && usable(id) {
                 candidates.push(id.to_string());
             }
         }
@@ -871,7 +874,19 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
     // the bots whose session happens to live on the instance the request landed
     // on — measured on Heroku: 5 dynos, 5 independent pools, the added bot used
     // by one dyno in five.
-    let usable = |id: &str| has_local_session(id) || crate::session::env_token_for(id).is_some();
+    //
+    // The second half is gated on there being NO recorded login flood. While a
+    // `FLOOD_WAIT` is armed a session-less bot cannot be logged in at all —
+    // `boot()` answers `420 FLOOD_WAIT caused by auth.importBotAuthorization` —
+    // so counting it as usable bought a doomed attempt that RE-ARMED the wait.
+    // That is how one bad login became `retry_after: 2421` for every viewer on
+    // the instance: each request tried the login again, and each try extended it.
+    // A bot that already holds a session file never logs in, so the gate does not
+    // apply to it — one logged-in bot keeps serving through the whole wait.
+    let flood_wait = crate::session::flood_remaining();
+    let usable = |id: &str| {
+        has_local_session(id) || (flood_wait == 0 && crate::session::env_token_for(id).is_some())
+    };
 
     // A Bot API `file_id` belongs to the bot that MINTED it — its embedded
     // `file_reference` is not interchangeable — so rotating bots for a request
@@ -891,8 +906,11 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
     } else {
         None
     };
+    // `pool_ready()`, not `get_bot_pool()`: the pool listing includes bots that
+    // have never logged in on this instance, and those must not become download
+    // candidates (see `session::pool_ready`).
     let pool_bot_ids: Vec<String> = if !bot_bound {
-        get_bot_pool().iter().filter_map(|b| {
+        crate::session::pool_ready().iter().filter_map(|b| {
             let id = jstr(b, "bot_id");
             if id.is_empty() { None } else { Some(id) }
         }).collect()
@@ -1061,13 +1079,13 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
         .chain(std::iter::once(active_bot.clone()))
         .chain(candidates.iter().cloned())
     {
-        // `has_local_session` alone would skip an env-supplied bot on an instance
-        // that has not logged it in yet, so accept it and pass its token through.
+        // The SAME predicate the candidate planner used, so planning and booting
+        // cannot disagree: `has_local_session` alone would skip an env-supplied bot
+        // on an instance that has not logged it in yet, so accept it and pass its
+        // token through — unless a login flood makes that login impossible, in
+        // which case skipping it is the whole point.
         let env_token = crate::session::env_token_for(&candidate);
-        if candidate.is_empty()
-            || (!has_local_session(&candidate) && env_token.is_none())
-            || tried.contains(&candidate)
-        {
+        if candidate.is_empty() || !usable(&candidate) || tried.contains(&candidate) {
             continue;
         }
         tried.push(candidate.clone());
@@ -1950,6 +1968,42 @@ mod tests {
         // Other pool bots are not added to candidates to prevent 410 FILE_REFERENCE_EXPIRED
         assert!(!cands.contains(&"bot_1".to_string()));
         assert!(!cands.contains(&"bot_3".to_string()));
+    }
+
+    /// A bot with no session file must never be the SERVING candidate while a
+    /// login flood is armed: it cannot stream, it cannot be logged in either, and
+    /// choosing it spends an attempt that re-arms the wait (measured:
+    /// `retry_after: 2421`). The logged-in bot has to win.
+    #[test]
+    fn a_sessionless_bot_is_not_a_candidate_during_a_login_flood() {
+        let pool = vec!["bot_no_session".to_string(), "bot_logged_in".to_string()];
+        let flood = true;
+        let usable = |id: &str| id == "bot_logged_in" || (!flood && id == "bot_no_session");
+
+        // Unbound: `pick_pool_bot()` suggested the session-less bot.
+        let (chosen, cands) = plan_download_candidates(
+            "",
+            "short1",
+            "bot_no_session",
+            Some("bot_no_session"),
+            &pool,
+            usable,
+        );
+        assert_eq!(chosen, "bot_logged_in", "the session-backed bot must win");
+        assert_eq!(cands, vec!["bot_logged_in".to_string()]);
+    }
+
+    /// With no flood recorded, an env-supplied bot that has not logged in yet is
+    /// still a legitimate candidate — a fresh dyno must be able to boot one.
+    #[test]
+    fn a_sessionless_env_bot_is_usable_when_no_flood_is_armed() {
+        let pool = vec!["bot_env".to_string()];
+        let flood = false;
+        let usable = |id: &str| id == "bot_env" && !flood;
+        let (chosen, cands) =
+            plan_download_candidates("", "short1", "bot_env", Some("bot_env"), &pool, usable);
+        assert_eq!(chosen, "bot_env");
+        assert!(cands.contains(&"bot_env".to_string()));
     }
 
     #[test]
