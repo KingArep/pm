@@ -204,15 +204,20 @@ pub fn is_local_request(ctx: &ReqCtx) -> bool {
 }
 
 pub fn is_loopback_request(ctx: &ReqCtx) -> bool {
+    // The tunnel check MUST come first. cloudflared dials us from 127.0.0.1, so
+    // testing `remote` first classified every PUBLIC request arriving through a
+    // quick tunnel as "loopback" — which made it privileged, and walked straight
+    // through `require_privileged` on /api/provision (and revealed `api_secret`
+    // on /api/session). `is_local_request` above already checks this first.
+    if is_cloudflare_tunnel_request(ctx) {
+        return false;
+    }
     let remote = ctx.remote.as_str();
     if remote.is_empty() {
         return false;
     }
     if remote == "127.0.0.1" || remote == "::1" || remote.starts_with("::ffff:127.0.0.1") {
         return true;
-    }
-    if is_cloudflare_tunnel_request(ctx) {
-        return false;
     }
     !ctx.local.is_empty() && remote == ctx.local && is_local_request(ctx)
 }
@@ -681,5 +686,71 @@ mod tests {
         assert!(!is_public_ip(&"192.168.1.5".parse().unwrap()));
         assert!(!is_public_ip(&"127.0.0.1".parse().unwrap()));
         assert!(is_public_ip(&"8.8.8.8".parse().unwrap()));
+    }
+
+    fn ctx_with(remote: &str, local: &str, headers: &[(&str, &str)]) -> ReqCtx {
+        let mut map = axum::http::HeaderMap::new();
+        for (k, v) in headers {
+            map.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        ReqCtx {
+            method: "POST".into(),
+            path: "/api/provision".into(),
+            raw_path: "/api/provision".into(),
+            query: Vec::new(),
+            headers: map,
+            cookies: HashMap::new(),
+            remote: remote.into(),
+            local: local.into(),
+            base_url: format!("http://{local}:8088"),
+        }
+    }
+
+    /// A request that arrived through the Cloudflare tunnel is NEVER this
+    /// machine, even though cloudflared dials us from 127.0.0.1. This is what
+    /// `require_privileged` on /api/provision relies on.
+    #[test]
+    fn tunnel_request_is_not_loopback() {
+        let via_tunnel = ctx_with("127.0.0.1", "192.168.2.225", &[("cf-ray", "8f00-HKG")]);
+        assert!(!is_loopback_request(&via_tunnel));
+        assert!(!auth_privileged(&via_tunnel));
+        assert!(require_privileged(&via_tunnel).is_some());
+    }
+
+    #[test]
+    fn hostname_alone_marks_a_tunnel_request() {
+        let by_host = ctx_with(
+            "127.0.0.1",
+            "192.168.2.225",
+            &[("host", "problems-apparel-para-school.trycloudflare.com")],
+        );
+        assert!(!is_loopback_request(&by_host));
+        assert!(require_privileged(&by_host).is_some());
+    }
+
+    #[test]
+    fn real_loopback_stays_privileged() {
+        let local = ctx_with("127.0.0.1", "192.168.2.225", &[]);
+        assert!(is_loopback_request(&local));
+        assert!(require_privileged(&local).is_none());
+    }
+
+    /// A public peer can never be privileged, with or without auth enabled.
+    #[test]
+    fn public_peer_is_never_privileged() {
+        let public = ctx_with("8.8.8.8", "192.168.2.225", &[]);
+        assert!(!auth_privileged(&public));
+        assert!(require_privileged(&public).is_some());
+    }
+
+    /// A LAN peer without a token cannot provision; the engine binds 0.0.0.0 on
+    /// Android and PaaS, which is exactly the case this guards.
+    #[test]
+    fn lan_peer_needs_a_token() {
+        let lan = ctx_with("192.168.2.50", "192.168.2.225", &[]);
+        assert!(require_privileged(&lan).is_some());
     }
 }

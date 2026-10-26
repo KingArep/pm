@@ -27,7 +27,10 @@ use serde_json::Value;
 
 use crate::config::wp_api_base;
 use crate::credentials::{save_api_secret, get_api_secret};
-use crate::httpc::http_json;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+
+use crate::httpc::{http_json, http_json_h};
 use crate::log::log;
 use crate::storage::{now, storage_path};
 
@@ -1119,18 +1122,63 @@ pub async fn auto_provision_guest(
 /// keeps the bot that is already active).
 async fn lease_guest_bot(tg: &crate::telegram::TelegramPool) -> Result<ProvisionResult, String> {
     let mut last_error: Option<String> = None;
-    for attempt in 0..2 {
+    // One keypair per install: the origin seals the bot token to it, so a
+    // captured response (proxy log, CDN, another install) cannot be reused.
+    let (provision_pk, provision_sk) = crate::credentials::provision_keypair();
+    // The install's Ed25519 key: the origin mints a token bound to its
+    // thumbprint, so a captured token cannot be used off this machine.
+    let (sign_pk, _sign_sk) = crate::credentials::sign_keypair();
+    let device_id = crate::diagnostics::get_device_id();
+    let lease_headers = vec![
+        ("X-PM-Pub".to_string(), STANDARD.encode(provision_pk)),
+        ("X-PM-Sign-Pub".to_string(), crate::credentials::b64u(sign_pk)),
+        ("X-PM-Device".to_string(), device_id.clone()),
+    ];
+
+    // Up to three DIFFERENT bots. A refused token retires that bot at the origin
+    // (report_failed_lease below), so the next iteration leases another one
+    // instead of failing the guest.
+    for attempt in 0..3 {
+        if attempt > 0 {
+            // A failed login already cost the origin a lease; do not hammer it.
+            tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64)).await;
+        }
         let url = format!(
             "{}/provision-session?_nocache={}_{}",
             wp_api_base(),
             now(),
             (rand::random::<u32>() % 9000) + 1000
         );
-        let resp = http_json(&url, &[], "GET", 6).await;
+        // 20s, not 6: the origin measured 10s on the first request after a PHP
+        // reload (cold opcache). Timing out there made the client re-lease and
+        // burn a provision for a request that was going to succeed.
+        let resp = http_json_h(&url, &[], "GET", 20, &lease_headers).await;
         // WordPress answers `"ok": 1` (a NUMBER) here, not `true`; `as_bool()`
         // alone silently rejected every valid provision response.
         let ok = truthy(resp.get("ok"));
-        let token = resp.get("bot_token").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        // Prefer the sealed token: when the origin sealed the credential for our
+        // key it does not send the plaintext one at all.
+        let token = match resp.get("sealed_token").and_then(|v| v.as_str()) {
+            Some(sealed) if !sealed.is_empty() => {
+                let raw = STANDARD.decode(sealed).unwrap_or_default();
+                match crate::credentials::open_sealed_token(&raw, &provision_pk, &provision_sk) {
+                    Some(t) => t.trim().to_string(),
+                    None => {
+                        log(
+                            "sealed token did not open",
+                            &serde_json::json!({"bot_id": resp.get("bot_id")}),
+                        );
+                        String::new()
+                    }
+                }
+            }
+            _ => resp
+                .get("bot_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        };
         if !ok || token.is_empty() {
             // Surface what the origin actually said. This used to be logged only,
             // so every failure reached the player as the useless
@@ -1160,11 +1208,43 @@ async fn lease_guest_bot(tg: &crate::telegram::TelegramPool) -> Result<Provision
         if let Some(secret) = resp.get("api_secret").and_then(|v| v.as_str()) {
             save_api_secret(secret);
         }
+        // Kept so a refused login can be reported back against THIS lease.
+        let ticket = resp
+            .get("ticket")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let target = match resp.get("bot_id") {
             Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
             Some(Value::Number(n)) => n.to_string(),
             _ => format!("prov_{}", random_suffix()),
         };
+
+        // Keep the bot-scoped ticket: it is what authorises /resolve-file(s)
+        // now, so the site-wide api_secret never has to be used.
+        if let Some(t) = resp.get("ticket").and_then(|v| v.as_str()) {
+            crate::credentials::save_provision_ticket(
+                t,
+                resp.get("expires_at").and_then(|v| v.as_i64()).unwrap_or(0),
+                &target,
+            );
+        }
+        // Option A: the install-scoped token (60 min) beats both the ticket and
+        // the api_secret — it is bound to our key and revocable on its own.
+        if let Some(tok) = resp.get("auth_token").and_then(|v| v.as_str()) {
+            crate::credentials::save_auth_token(
+                tok,
+                resp.get("auth_expires_at").and_then(|v| v.as_i64()).unwrap_or(0),
+            );
+            log(
+                "install token stored",
+                &serde_json::json!({
+                    "install_id": resp.get("install_id"),
+                    "expires_at": resp.get("auth_expires_at"),
+                }),
+            );
+        }
 
         match tg.boot(&target, Some(&token)).await {
             Ok(entry) => {
@@ -1189,12 +1269,47 @@ async fn lease_guest_bot(tg: &crate::telegram::TelegramPool) -> Result<Provision
                 if is_clock_or_authkey_error(&e) {
                     return Err(friendly_login_error(&e));
                 }
+                // Telegram refused this bot's token. Retire it at the origin so
+                // the round-robin stops handing it to every other guest, then
+                // loop and lease a different bot.
+                crate::credentials::clear_provision_ticket();
+                // The install token names a bot too; a refused login must not
+                // leave it behind, so the next lease mints a fresh one.
+                crate::credentials::clear_auth_token();
+                report_failed_lease(&target, &ticket, &device_id, &e).await;
                 last_error = Some(e);
             }
         }
     }
     Err(last_error
         .unwrap_or_else(|| "Could not obtain guest bot session from server.".to_string()))
+}
+
+/// `POST /provision-failed`: quarantine a bot whose token Telegram refused.
+///
+/// Best effort on purpose — the guest must still get the `last_error` from the
+/// caller, so a failure to report is logged and ignored.
+async fn report_failed_lease(bot_id: &str, ticket: &str, device_id: &str, reason: &str) {
+    if ticket.is_empty() || bot_id.is_empty() {
+        // Older origins do not mint tickets; nothing to authenticate the report.
+        return;
+    }
+    let url = format!("{}/provision-failed", wp_api_base());
+    let payload = vec![
+        ("bot_id".to_string(), bot_id.to_string()),
+        ("ticket".to_string(), ticket.to_string()),
+        ("device_id".to_string(), device_id.to_string()),
+        ("reason".to_string(), reason.chars().take(200).collect::<String>()),
+    ];
+    let resp = http_json(&url, &payload, "POST", 8).await;
+    log(
+        "reported failed lease",
+        &serde_json::json!({
+            "bot_id": bot_id,
+            "ok": resp.get("ok").cloned().unwrap_or(serde_json::Value::Null),
+            "quarantined_for": resp.get("quarantined_for").cloned().unwrap_or(serde_json::Value::Null),
+        }),
+    );
 }
 
 /// Make sure this instance holds at least [`GUEST_BOTS_PER_INSTANCE`] bot with a

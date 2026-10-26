@@ -21,6 +21,7 @@ use std::sync::{Mutex, OnceLock};
 
 use rand::RngCore;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::config::app_version;
 use crate::storage::{now, storage_path};
@@ -72,18 +73,201 @@ pub fn device_id_path() -> PathBuf {
     storage_path("device_id.txt")
 }
 
+/// The identifier this install presents to the origin (`X-PM-Device`, the
+/// `/api/session` `device_id`, and the binding inside a provision ticket).
+///
+/// Preference order:
+///  1. `PM_DEVICE_ID` — a platform id only the HOST app can read. On Android
+///     that is `Settings.Secure.ANDROID_ID`, which needs a `JNIEnv` + `Context`
+///     that a subprocess (which is what this engine is, under Termux/proot or
+///     spawned by the APK shell) simply does not have. The shell injects it
+///     instead of us pretending to have JNI;
+///  2. an id already in `storage/device_id.txt` — existing installs keep the
+///     value the origin knows, so no ticket or session is invalidated;
+///  3. the OS machine id, **hashed** — DESKTOP ONLY (Windows/Linux/macOS).
+///     Survives a reinstall and a wiped `storage/`, so the origin recognises the
+///     same machine. Nothing is written to disk: it is derived, so there is no
+///     file to keep in sync;
+///  4. random, persisted — Android (see the note in `read_machine_uid`) and any
+///     container/ROM that exposes no trustworthy machine id.
+///
+/// Android is deliberately excluded from (3): `/etc/machine-id` there is a
+/// system-wide id shared by every app, not the per-app identity Android exposes,
+/// and it is missing on some ROMs. The shell injects `ANDROID_ID` as
+/// `PM_DEVICE_ID` instead (see `RustServer.kt`); anything else lands on (4).
 pub fn get_device_id() -> String {
+    if let Some(injected) = crate::storage::env("PM_DEVICE_ID") {
+        let injected = injected.trim();
+        if !injected.is_empty() {
+            // Hashed like the machine id: 12 hex chars on the wire either way.
+            return derive_device_id_from_machine(injected);
+        }
+    }
+
     if let Ok(v) = fs::read_to_string(device_id_path()) {
         let v = v.trim().to_string();
         if !v.is_empty() {
             return v;
         }
     }
+
+    let uid = machine_uid();
+    if !uid.trim().is_empty() {
+        return derive_device_id_from_machine(&uid);
+    }
+
     let mut buf = [0u8; 6];
     rand::rng().fill_bytes(&mut buf);
     let id = hex::encode(buf);
     let _ = fs::write(device_id_path(), &id);
     id
+}
+
+/// The OS machine id, read directly (cached once per process).
+///
+/// Deliberately dependency-free: `machineid-rs` only implements `get_hwid()`
+/// for linux/windows/macos, so it cannot build for Android — the platform where
+/// a stable id matters most (Termux/proot installs get wiped often).
+fn machine_uid() -> String {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(read_machine_uid).clone()
+}
+
+fn read_machine_uid() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        // Written by Windows Setup; survives reinstalls of this app.
+        if let Ok(out) = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Cryptography",
+                "/v",
+                "MachineGuid",
+            ])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if line.contains("MachineGuid") {
+                    if let Some(v) = line.split_whitespace().last() {
+                        let v = v.trim();
+                        if !v.is_empty() {
+                            return v.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        String::new()
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+            if let Ok(v) = fs::read_to_string(path) {
+                let v = v.trim().to_string();
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+        }
+        String::new()
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        // No `/etc/machine-id` on Android. It is a SYSTEM-WIDE identifier shared
+        // by every app on the device (not the per-app id Android intends apps to
+        // use), and it is absent or unreadable on some ROMs. The platform id is
+        // `Settings.Secure.ANDROID_ID`, which only the shell can read — the engine
+        // is a child process started by `RustServer.kt`, so it has no JNIEnv — and
+        // the shell passes it in as PM_DEVICE_ID. Everything else falls back to
+        // the per-install id in `storage/device_id.txt`.
+        String::new()
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("ioreg")
+            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if line.contains("IOPlatformUUID") {
+                    if let Some(v) = line.split('=').nth(1) {
+                        let v = v.trim().trim_matches('"');
+                        if !v.is_empty() {
+                            return v.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        String::new()
+    }
+
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos"
+    )))]
+    {
+        String::new()
+    }
+}
+
+/// `sha256("pencarimovie-device|" + machine_uid)` truncated to 12 hex chars.
+///
+/// Stable for a given machine, and the raw id cannot be read back out of it.
+fn derive_device_id_from_machine(uid: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"pencarimovie-device|");
+    hasher.update(uid.trim().as_bytes());
+    hex::encode(hasher.finalize())[..12].to_string()
+}
+
+#[cfg(test)]
+mod device_id_tests {
+    use super::derive_device_id_from_machine;
+
+    /// Android must never fall back to `/etc/machine-id`: it is a system-wide id
+    /// shared by every app, not the per-app identity, and the shell is what
+    /// supplies `ANDROID_ID` via `PM_DEVICE_ID`.
+    #[cfg(target_os = "android")]
+    #[test]
+    fn android_never_reads_a_system_machine_id() {
+        assert_eq!(super::machine_uid(), "");
+    }
+
+    #[test]
+    fn machine_derived_id_is_stable_and_twelve_hex_chars() {
+        let a = derive_device_id_from_machine("0f3c1c2a-9d1b-4b7e-8f00-1a2b3c4d5e6f");
+        let b = derive_device_id_from_machine("0f3c1c2a-9d1b-4b7e-8f00-1a2b3c4d5e6f");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 12);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Whitespace from the OS file must not change the id.
+        let c = derive_device_id_from_machine("  0f3c1c2a-9d1b-4b7e-8f00-1a2b3c4d5e6f\n");
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn different_machines_get_different_ids() {
+        let a = derive_device_id_from_machine("machine-one");
+        let b = derive_device_id_from_machine("machine-two");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn raw_machine_id_is_not_recoverable_from_the_output() {
+        let uid = "0f3c1c2a-9d1b-4b7e-8f00-1a2b3c4d5e6f";
+        let id = derive_device_id_from_machine(uid);
+        assert!(!id.contains("0f3c1c2a"));
+        assert!(!uid.contains(&id));
+    }
 }
 
 fn read_first_line(path: &str) -> String {

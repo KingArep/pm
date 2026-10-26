@@ -104,10 +104,59 @@ fn encode_query(params: &[(String, String)]) -> String {
     ser.finish()
 }
 
+/// `X-PM-Auth` plus a per-request proof, when this install holds a token.
+///
+/// This is the Option-A credential: the token names the install and the key it
+/// is bound to, and the proof shows we still hold that key. A copied token is
+/// inert — it cannot produce a valid proof from another machine.
+pub(crate) fn pm_auth_headers(method: &str, url: &str) -> Vec<(String, String)> {
+    let token = crate::credentials::auth_token();
+    if token.is_empty() {
+        return Vec::new();
+    }
+    let ts = crate::storage::now();
+    let nonce = crate::credentials::new_nonce();
+    // The signed endpoint must match the origin's `pm_auth_endpoint()`, which
+    // takes the last segment of the matched REST route.
+    let endpoint = crate::credentials::endpoint_of(url);
+    let Some((proof, pubkey)) = crate::credentials::sign_proof(method, &endpoint, ts, &nonce) else {
+        return Vec::new();
+    };
+    vec![
+        ("X-PM-Auth".to_string(), token),
+        ("X-PM-Sign-Pub".to_string(), pubkey),
+        ("X-PM-Ts".to_string(), ts.to_string()),
+        ("X-PM-Nonce".to_string(), nonce),
+        ("X-PM-Proof".to_string(), proof),
+    ]
+}
+
 /// `fd_http_json()`: GET (query string) or POST (JSON body) with X-API-Secret.
 pub async fn http_json(url: &str, params: &[(String, String)], method: &str, timeout_secs: u64) -> Value {
+    http_json_h(url, params, method, timeout_secs, &[]).await
+}
+
+/// [`http_json()`] plus caller headers.
+///
+/// Every call also carries the bot-scoped provision ticket when this install
+/// holds one, so the protected routes authorise on a ticket that names one bot
+/// and expires, rather than on the site-wide secret. Callers that need extra
+/// headers pass them here — the lease advertises its X25519 public key this way.
+pub async fn http_json_h(
+    url: &str,
+    params: &[(String, String)],
+    method: &str,
+    timeout_secs: u64,
+    headers: &[(String, String)],
+) -> Value {
     let mut target = url.to_string();
     let secret = get_api_secret();
+    let extra: Vec<(String, String)> = headers
+        .iter()
+        .cloned()
+        .chain(crate::credentials::ticket_headers())
+        .chain(pm_auth_headers(method, &target))
+        .collect();
 
     let mut body: Option<String> = None;
     if method.eq_ignore_ascii_case("GET") {
@@ -128,6 +177,7 @@ pub async fn http_json(url: &str, params: &[(String, String)], method: &str, tim
         let target = u.to_string();
         let secret = secret.clone();
         let body = body.clone();
+        let extra = extra.clone();
         async move {
             let mut req = client()
                 .request(
@@ -143,6 +193,9 @@ pub async fn http_json(url: &str, params: &[(String, String)], method: &str, tim
                 .header("X-Requested-With", "XMLHttpRequest");
             if !secret.is_empty() {
                 req = req.header("X-API-Secret", secret);
+            }
+            for (k, v) in &extra {
+                req = req.header(k.as_str(), v.as_str());
             }
             if let Some(b) = body {
                 req = req.header("Content-Type", "application/json").body(b);
