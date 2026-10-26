@@ -813,6 +813,38 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
     }
 
     if p == "/api/provision" && (m == "GET" || m == "POST") {
+        // SECURITY — this endpoint SPENDS a provision at the origin and answers
+        // with the WordPress `api_secret`, but it had no gate at all. The engine
+        // binds 0.0.0.0 on Android and on a detected PaaS, so any device on the
+        // same wifi could drain the guest-bot pool and harvest the secret with a
+        // plain GET. The dashboard calls it from loopback, which stays allowed.
+        if let Some(resp) = require_privileged(&ctx) {
+            return resp;
+        }
+        // SECURITY — `Access-Control-Allow-Origin: *` is sent on every response,
+        // so without this a page on ANY site the user visits could POST here from
+        // the browser, read the JSON (CORS lets it), and walk away with the
+        // secret: the request comes FROM this machine, so `require_privileged`
+        // alone cannot tell it apart. Same-origin dashboard use (127.0.0.1,
+        // localhost, or the LAN/tunnel address it was loaded from) is allowed.
+        let origin = ctx.hdr("origin");
+        if !origin.is_empty() {
+            let port = state.port;
+            let allowed = [
+                ctx.base_url.trim_end_matches('/').to_string(),
+                format!("http://127.0.0.1:{port}"),
+                format!("http://localhost:{port}"),
+            ];
+            if !allowed.iter().any(|a| a == &origin) {
+                return json_response(
+                    403,
+                    &serde_json::json!({
+                        "ok": 0,
+                        "message": "Cross-origin provisioning is not allowed."
+                    }),
+                );
+            }
+        }
         return match auto_provision_guest(&state.telegram).await {
             Ok(prov) => json_response(
                 200,
@@ -822,6 +854,8 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
                     "bot_id": prov.bot_id,
                     "bot_username": prov.bot_username,
                     "bot_name": prov.bot_name,
+                    // Privileged callers only (checked above): the engine itself
+                    // reads this file when it talks to WordPress.
                     "api_secret": get_api_secret(),
                     "pool": get_bot_pool(),
                 }),
@@ -1848,24 +1882,10 @@ async fn handle_stream(state: &Arc<AppState>, ctx: &ReqCtx, item_type: &str, ite
             }
         };
         let file_name = stream_filename(&title, &jstr(&resolved, "mime"));
-        // Same rule as `stream_item()` further down: only a plain MP4/M4V/WebM may
-        // be advertised as web-ready. This branch is what a FILE catalog lists
-        // (`pm_file_<code>` / `pm:file:<code>`), and it used to hardcode
-        // `notWebReady: false`, so every MKV taken from a file catalog was handed
-        // to the HTML5 <video>. Chrome/WebView cannot demux Matroska: it reads the
-        // last bytes for the Cues, aborts, and re-requests the same URL - measured
-        // on a real phone as `range: bytes=3229198459-` (the final 3 bytes of
-        // 3229198462) every ~60s, never playing, while the identical file streamed
-        // at 10.5 MB/s through libmpv once the flag routed it there.
-        let web_ready = matches!(
-            std::path::Path::new(&file_name)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase()
-                .as_str(),
-            "mp4" | "m4v" | "webm"
-        );
+        // NO `notWebReady` here either — see `stream_item()`: the flag made
+        // Stremio (web AND Android) hide every Matroska row, and the PHP never
+        // sent it on a playable URL. `behaviorHints.filename` still carries the
+        // container, which is what a player should decide from.
         let mime = {
             let m = jstr(&resolved, "mime");
             let m = if m.is_empty() { jstr(&resolved, "file_type") } else { m };
@@ -1902,7 +1922,6 @@ async fn handle_stream(state: &Arc<AppState>, ctx: &ReqCtx, item_type: &str, ite
                     "behaviorHints": {
                         "filename": file_name,
                         "videoSize": size,
-                        "notWebReady": !web_ready,
                         "bingeGroup": "pencarimovie"
                     },
                 })
@@ -3241,12 +3260,16 @@ const STREAM_CACHE_TTL: i64 = 300;
 /// series root. The base url is too, because every download url in the payload is
 /// absolute (`http://192.168.1.5:8088/api/download/...`).
 ///
-/// The `v2` prefix retires the entries written when the sponsor was baked into
-/// the cached body: those cannot be distinguished from a body cached during a
-/// WordPress outage (the exact intermittent "sponsor missing" symptom), so they
-/// are ignored rather than upgraded. L2 keeps them only until they expire.
+/// The version prefix retires bodies written by an older build, because a cached
+/// list outlives a restart (L2 is on disk) and cannot be "upgraded":
+///
+/// * `v2` — the sponsor used to be baked into the cached body, which could not be
+///   distinguished from a body cached during a WordPress outage;
+/// * `v3` — every row carried `behaviorHints.notWebReady`, which made Stremio
+///   (web AND Android) hide all of them; those bodies must not be served for the
+///   last minutes of their TTL after the fix.
 fn stream_cache_key(item_type: &str, item_id: &str, base_url: &str) -> String {
-    format!("v2|{}|{}|{}", item_type, item_id, base_url)
+    format!("v3|{}|{}|{}", item_type, item_id, base_url)
 }
 
 /// Place the per-answer rows above a finished stream list.
@@ -3581,11 +3604,11 @@ async fn sponsor_item() -> Option<Value> {
 /// line 2: 💾 1.6 GB • ⚡ Telegram • BluRay • HEVC • AAC5.1
 /// ```
 ///
-/// `behaviorHints.filename` carries the real name, `videoSize` the byte count,
-/// and `notWebReady` is set for anything that is not a plain MP4/M4V/WebM —
-/// PHP's rule, which is what keeps a Matroska stream from being handed to the
-/// HTML5 player. `bingeGroup` (series only) carries RELEASE attributes and never
-/// an episode number, because Stremio compares it with `===` across episodes.
+/// `behaviorHints.filename` carries the real name and `videoSize` the byte
+/// count. **`notWebReady` is deliberately NOT sent** — see the note inside, the
+/// one flag that made Stremio drop every row. `bingeGroup` (series only) carries
+/// RELEASE attributes and never an episode number, because Stremio compares it
+/// with `===` across episodes.
 #[allow(clippy::too_many_arguments)]
 fn stream_item(
     ctx: &ReqCtx,
@@ -3704,18 +3727,16 @@ fn stream_item(
         description.push_str(&format!("\n💬 {}", flags.join(" / ")));
     }
 
-    let ext = std::path::Path::new(&file_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let web_ready = matches!(ext.as_str(), "mp4" | "m4v" | "webm");
-
     let mut hints = serde_json::Map::new();
     hints.insert("filename".into(), serde_json::json!(file_name.clone()));
-    if !web_ready {
-        hints.insert("notWebReady".into(), serde_json::json!(true));
-    }
+    // NO `notWebReady`. The PHP never sent it on a playable URL (only on the
+    // `externalUrl` variant), and it is the flag that emptied the list in
+    // Stremio: `web.stremio.com` AND the Android app HIDE every stream that
+    // carries it, so a Matroska-only title showed the sponsored item and nothing
+    // else — 100 of 100 rows gone while Nuvio, which ignores the hint, listed
+    // them all. `filename` still tells a player what container it is getting, so
+    // the dashboard can choose libmpv itself; a row the user cannot SEE is worse
+    // than a row the web player cannot demux.
     if size > 0 {
         hints.insert("videoSize".into(), serde_json::json!(size));
     }
@@ -7450,6 +7471,32 @@ mod tests {
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string()
+    }
+
+    /// Stremio — the web app AND the Android app — HIDES every stream that
+    /// carries `behaviorHints.notWebReady`, so a Matroska-only title listed the
+    /// sponsored item and nothing else (reported as "streams list for stremio is
+    /// broken, only show sponsored message" while Nuvio showed all 100 rows).
+    /// The PHP never sent the flag on a playable URL; neither may we.
+    #[test]
+    fn a_playable_stream_never_carries_not_web_ready() {
+        let item = crate::matcher::FileItem {
+            title: "Movie.2026.1080p.mkv".to_string(),
+            ..Default::default()
+        };
+        let j = item_json(&item);
+        let hints = &j["behaviorHints"];
+        assert!(
+            hints.get("notWebReady").is_none(),
+            "an MKV row must stay visible in Stremio: {hints}"
+        );
+        // The container is still advertised, which is what a player decides from.
+        assert!(hints["filename"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .ends_with(".mkv"));
+        assert!(j["url"].as_str().unwrap_or("").contains("/api/download/"));
     }
 
     /// Line 1 of `description` — the line the Nuvio app renders large.
