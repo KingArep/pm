@@ -2424,6 +2424,42 @@ mod tests {
         ));
     }
 
+    /// Reported right after the Witch leak: "To My Beloved Thief" (2026,
+    /// `pm:post:9000018021`). Every row of its S01E01–E05 lists is the show's
+    /// own file — including the `nunadrama.` / `LayarAsia.` / `OLD.` prefixes
+    /// and the `2025` some rips carry on a 2026 entry — so the tightening above
+    /// must leave all of them in place. Filenames and episode numbers are
+    /// verbatim from the live answer.
+    #[test]
+    fn series_keeps_every_row_of_its_own_show() {
+        for (file, episode) in [
+            ("nunadrama.To.My.Beloved.Thief.E01.1080p.mp4", 1),
+            ("To.My.Beloved.Thief.EP1.1080p.MalaySub.OMG.mp4", 1),
+            ("To.My.Beloved.Thief.EP1.MalaySub.mp4", 1),
+            ("OLD.E01.To.My.Beloved.Thief.2025.mp4", 1),
+            ("To.My.Beloved.Thief.E01.NF.1080p.x265.mkv", 1),
+            ("To.My.Beloved.Thief.S01E01.NF.x264.540p.mkv", 1),
+            ("To.My.Beloved.Thief.S01E02.x265.720p.NF.WEB.DL.MrHulk.mkv", 2),
+            ("LayarAsia.To.My.Beloved.Thief.E03.720p.mp4", 3),
+            ("OLD.E03.To.My.Beloved.Thief.2026.mp4", 3),
+            ("LayarAsia.To.My.Beloved.Thief.E05.360p.mp4", 5),
+            ("To.My.Beloved.Thief.E05.NF.540p.x265.mkv", 5),
+        ] {
+            assert!(
+                series_file_matches_title(
+                    file,
+                    "To My Beloved Thief 2026",
+                    1,
+                    episode,
+                    "2026",
+                    "",
+                    &[]
+                ),
+                "{file} is an episode of To My Beloved Thief and must stay in the list"
+            );
+        }
+    }
+
     /// Verbatim port of the `MUST NOT REGRESS` cases in
     /// `legacy/php/test_kudrat_series.php` (which backend.php:9347 names as this
     /// guard's regression test). `series_year` is the FIRST year of the entry
