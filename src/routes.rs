@@ -2675,6 +2675,10 @@ async fn handle_external_stream(
         }
     };
 
+    // The by-id page, when it did NOT cover the requested episode: kept as a SEED
+    // for the episode ladder below instead of being returned on its own.
+    let mut by_id_seed: Vec<crate::wp_data::WpFile> = Vec::new();
+
     // A row may already know which catalog post owns the id — then the post path
     // is exact and the title search is unnecessary.
     if title.is_empty() {
@@ -2720,28 +2724,46 @@ async fn handle_external_stream(
             // the only place it exists for an id that is not in `media_ids_idx`, and
             // the ±1-year guard in the matcher is inert without it.
             if year.is_empty() && !by_id_year.is_empty() {
-                year = by_id_year;
+                year = by_id_year.clone();
             }
             log(
                 "stream: external id resolved by origin id search",
-                &serde_json::json!({"item_id": item_id, "title": t, "files": by_id_files.len()}),
+                &serde_json::json!({"item_id": item_id, "title": &t, "files": by_id_files.len()}),
             );
-            return Some(
-                build_streams_from_files(
-                    ctx,
-                    item_type,
-                    item_id,
-                    &t,
-                    &year,
-                    &aka,
-                    &episode_media_id,
-                    by_id_files,
-                    season,
-                    episode,
-                    upstream,
-                )
-                .await,
+            // A SERIES' by-id page is ONE page of the whole show, not the episode.
+            // Measured on `tt35324004` ("Tigers Sniff the Rose") on a phone running
+            // 1.0.92: the probe answered 5 rows, none of them the requested
+            // episode, and returning here sent those 5 straight to the matcher —
+            // E1 answered "No Streams Found" while the show's own post carried 3
+            // playable files. Only short-circuit when the page really covers the
+            // episode; otherwise keep it as a SEED and let the ladder run.
+            if by_id_page_covers_episode(kind, &by_id_files, season, episode) {
+                return Some(
+                    build_streams_from_files(
+                        ctx,
+                        item_type,
+                        item_id,
+                        &t,
+                        &year,
+                        &aka,
+                        &episode_media_id,
+                        by_id_files,
+                        season,
+                        episode,
+                        upstream,
+                    )
+                    .await,
+                );
+            }
+            log(
+                "stream: by-id page does not cover the episode, running the ladder",
+                &serde_json::json!({
+                    "item_id": item_id, "title": &t, "files": by_id_files.len(),
+                    "season": season, "episode": episode,
+                }),
             );
+            title = t;
+            by_id_seed = by_id_files;
         }
 
         // (2) UPSTREAM META. `backend.php`'s `fd_resolve_external_media_metadata()`
@@ -2829,6 +2851,13 @@ async fn handle_external_stream(
         title = resolved;
     }
 
+    // The by-id page joins the ladder as an extra seed: it is already resolved,
+    // already paid for, and the `$add()` filter below decides what it may
+    // contribute.
+    if !by_id_seed.is_empty() {
+        files.append(&mut by_id_seed);
+    }
+
     // A SERIES must run the FULL `fd_fetch_episode_stream_files()` ladder, not
     // just the title search. The title search answers a single page; the
     // per-episode index search and the probe ladder are what surface the
@@ -2868,6 +2897,37 @@ async fn handle_external_stream(
         )
         .await,
     )
+}
+
+/// Does the origin's by-id page actually carry the requested episode?
+///
+/// A MOVIE's page is the film, so any row covers it. A SERIES' page is one slice
+/// of a whole show — `tt35324004` answered 5 rows and none of them was E1 — and
+/// returning those 5 on their own is what made an episode with 3 playable files
+/// answer "No Streams Found". Only a row that parses to the requested
+/// season/episode lets the fast path short-circuit; otherwise the caller keeps
+/// the page as a seed and runs the episode ladder.
+///
+/// An unknown episode (`0`, a series ROOT) is covered by any row, because there
+/// is no episode to contradict.
+fn by_id_page_covers_episode(
+    kind: &str,
+    files: &[crate::wp_data::WpFile],
+    season: i32,
+    episode: i32,
+) -> bool {
+    if kind != "series" || episode <= 0 {
+        return true;
+    }
+    files.iter().any(|f| {
+        let (s, e, _) = crate::matcher::classify_season_episode(
+            &f.title,
+            f.season_num,
+            f.episode_num,
+            &f.caption,
+        );
+        e > 0 && s.max(1) == season.max(1) && e == episode
+    })
 }
 
 /// `tt1234567[:S:E]`, `tmdb:123`, `kitsu:12:1`, `mal:5`, `tvdb:81797:1:1`,
@@ -8532,6 +8592,40 @@ mod tests {
             .collect();
         let gaps: Vec<(i32, i32)> = episode_gaps(&two_seasons).into_iter().collect();
         assert_eq!(gaps, vec![(2, 1)]);
+    }
+
+    /// A series' by-id page is ONE page of the whole show, so it must never be
+    /// treated as that episode's answer. Measured on `tt35324004` ("Tigers Sniff
+    /// the Rose") on a phone running 1.0.92: the probe answered 5 rows, none of
+    /// them E1, and E1 answered "No Streams Found" while 3 playable files
+    /// existed. The page is now a seed and the episode ladder runs.
+    #[test]
+    fn by_id_page_must_cover_the_requested_episode() {
+        use crate::wp_data::WpFile;
+
+        let page: Vec<WpFile> = (5..=9)
+            .map(|e| WpFile {
+                title: format!("LayarAsia.Tigers.Sniff.the.Rose.{}.1080p.mp4", e),
+                ..Default::default()
+            })
+            .collect();
+        assert!(!by_id_page_covers_episode("series", &page, 1, 1));
+        assert!(by_id_page_covers_episode("series", &page, 1, 7));
+
+        // A MOVIE's page IS the film, and a series ROOT has no episode to
+        // contradict — both keep the fast path.
+        assert!(by_id_page_covers_episode("movie", &page, 0, 0));
+        assert!(by_id_page_covers_episode("series", &page, 1, 0));
+        assert!(by_id_page_covers_episode("series", &[], 1, 0));
+
+        // A different SEASON is not coverage either.
+        let s2 = vec![WpFile {
+            title: "Show.S02E01.1080p.mkv".to_string(),
+            ..Default::default()
+        }];
+        assert!(!by_id_page_covers_episode("series", &s2, 1, 1));
+        assert!(by_id_page_covers_episode("series", &s2, 2, 1));
+        assert!(!by_id_page_covers_episode("series", &[], 1, 1));
     }
 
     #[test]

@@ -26,6 +26,21 @@ All notable changes to the PencariMovie Server / Downloader project will be docu
   re-checked against every existing series rule (`series_keeps_embedded_year`,
   `series_glory_cases_from_php_regression_suite`, …).
 
+- **A series reached by its `tt…` id no longer answers "No Streams Found" for an
+  episode whose files are outside the one page the origin returns for that id.**
+  Measured on `tt35324004` ("Tigers Sniff the Rose"): the origin answered 5 rows
+  for the id, none of them E1, and `handle_external_stream()` returned those 5
+  straight to the matcher — so E1 answered "No Streams Found" while the show's
+  own post carried 3 playable files (865 / 530 / 146 MB). The by-id page is now
+  only a fast path when [`by_id_page_covers_episode()`](src/routes.rs:2874) says
+  it carries the requested episode; otherwise it joins the episode ladder as a
+  seed, exactly where the title search's rows go.
+  - The post route was never affected (`pm:post:9000035085:1:1` answered 3 rows
+    throughout), which is what made this look like a metadata bug from the app.
+  - Pinned by `routes::tests::by_id_page_must_cover_the_requested_episode`
+    (E1 outside a E5–E9 page → ladder; E7 inside → fast path; season must match;
+    a movie page and a series root stay covered).
+
 - **A series' episode list is no longer short by the episodes that live only in
   the origin index.** `pm:post:9000018021` ("To My Beloved Thief 2026") owns
   E03–E14 and E16 — the 13 rows its `post-files` returns — so `/meta` offered 13
