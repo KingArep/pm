@@ -151,6 +151,23 @@ pub async fn http_json_h(
     timeout_secs: u64,
     headers: &[(String, String)],
 ) -> Value {
+    http_json_h_status(url, params, method, timeout_secs, headers).await.0
+}
+
+/// [`http_json_h()`] that ALSO reports the HTTP status.
+///
+/// `http_json()` collapses "the origin answered 503" and "the origin answered
+/// `{"ok":0}`" into the same empty object — which is exactly why `/eclipse/stream`
+/// reported a BUSY origin ("Server busy resolving file" while a Telegram relay
+/// runs) as a track that does not exist. The music route needs the two apart, so
+/// it uses this variant. `0` means the request never completed.
+pub async fn http_json_h_status(
+    url: &str,
+    params: &[(String, String)],
+    method: &str,
+    timeout_secs: u64,
+    headers: &[(String, String)],
+) -> (Value, u16) {
     // PM-Auth self-heal, BEFORE the call that needs it.
     //
     // Boot enrolment alone is not enough on a phone: the engine is only started
@@ -284,9 +301,12 @@ pub async fn http_json_h(
             "http_json failed",
             &serde_json::json!({"url": target, "status": status, "error": err}),
         );
-        return Value::Object(serde_json::Map::new());
+        return (Value::Object(serde_json::Map::new()), status);
     }
-    serde_json::from_str(&text).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+    (
+        serde_json::from_str(&text).unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+        status,
+    )
 }
 
 /// Is this a usable WordPress body (as opposed to an error envelope)?

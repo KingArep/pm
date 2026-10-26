@@ -1862,10 +1862,12 @@ async fn handle_stream(state: &Arc<AppState>, ctx: &ReqCtx, item_type: &str, ite
         .unwrap_or("");
     if is_direct && !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric()) {
         let active_bot = get_bot_id();
-        let resolved = if active_bot.is_empty() {
-            resolve_shortcode_concurrent(code, &[]).await
+        // Keep the STATUS: a busy origin (503 "Server busy resolving file") is not
+        // a file that vanished, and it must not render as a dead card.
+        let (resolved, resolve_status) = if active_bot.is_empty() {
+            (resolve_shortcode_concurrent(code, &[]).await, 0u16)
         } else {
-            resolve_shortcode(code, &active_bot, false).await
+            crate::resolve::resolve_shortcode_status(code, &active_bot, false).await
         };
         let file_id = {
             let a = jstr(&resolved, "file_id_mt");
@@ -1873,6 +1875,27 @@ async fn handle_stream(state: &Arc<AppState>, ctx: &ReqCtx, item_type: &str, ite
         };
         if file_id.is_empty() {
             let msg = jstr(&resolved, "message");
+            // The origin is busy or unreachable: answer 503 + `Retry-After` so the
+            // client retries the same item, instead of the "File could not be
+            // resolved" card that looks like the release is gone.
+            if resolve_status >= 500 || resolve_status == 0 {
+                log(
+                    "stream resolve: origin unavailable",
+                    &serde_json::json!({"short_code": code, "origin_status": resolve_status}),
+                );
+                let mut resp = json_response(
+                    503,
+                    &serde_json::json!({
+                        "error": "File temporarily unavailable",
+                        "message": "The origin is busy resolving this file. Retry in a few seconds.",
+                    }),
+                );
+                resp.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_static("5"),
+                );
+                return resp;
+            }
             return single_card_streams(
                 &ctx.base_url,
                 serde_json::json!({
@@ -6307,10 +6330,13 @@ async fn eclipse_stream(ctx: &ReqCtx, short_code: &str) -> Response {
         &serde_json::json!({"code": code, "quality": ctx.qs("quality")}),
     );
     let bot = get_bot_id();
-    let resolved = if bot.is_empty() {
-        resolve_shortcode_concurrent(&code, &[]).await
+    // The STATUS matters here: a busy origin (503 "Server busy resolving file",
+    // retry_after 5) is not a missing track. Before this, every origin hiccup
+    // reached the music client as `404 Track not found` and the track was skipped.
+    let (resolved, resolve_status) = if bot.is_empty() {
+        (resolve_shortcode_concurrent(&code, &[]).await, 0u16)
     } else {
-        resolve_shortcode(&code, &bot, false).await
+        crate::resolve::resolve_shortcode_status(&code, &bot, false).await
     };
     let file_name = {
         let t = jstr(&resolved, "title");
@@ -6324,8 +6350,25 @@ async fn eclipse_stream(ctx: &ReqCtx, short_code: &str) -> Response {
         // Silent before: a 404 with no trail is impossible to debug from a phone.
         log(
             "eclipse stream: the resolve carried no file name",
-            &serde_json::json!({"short_code": code, "bot_id": bot, "resolved": resolved}),
+            &serde_json::json!({"short_code": code, "bot_id": bot, "origin_status": resolve_status}),
         );
+        // A 5xx / a request that never completed means the origin is busy or
+        // unreachable, NOT that the track is missing: answer 503 + `Retry-After`
+        // so the client retries the same track instead of dropping it.
+        if resolve_status >= 500 || resolve_status == 0 {
+            let mut resp = json_response(
+                503,
+                &serde_json::json!({
+                    "error": "Track temporarily unavailable",
+                    "message": "The origin is busy resolving this file. Retry in a few seconds.",
+                }),
+            );
+            resp.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("5"),
+            );
+            return resp;
+        }
         return stremio_json(404, &serde_json::json!({"error": "Track not found"}), "no-store");
     }
     let mime = {

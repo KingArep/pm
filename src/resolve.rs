@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use crate::cache;
 use crate::config::wp_api_base;
-use crate::httpc::http_json;
+use crate::httpc::{http_json, http_json_h_status};
 use crate::log::log;
 use crate::session::{get_bot_id, get_bot_pool, pick_pool_bot};
 use crate::storage::now;
@@ -173,16 +173,34 @@ fn not_found_result(v: &Value) -> bool {
 
 /// `fd_resolve_shortcode()`: WordPress `/resolve-file` with the retry ladder.
 pub async fn resolve_shortcode(short_code: &str, bot_id: &str, bypass_cache: bool) -> Value {
+    resolve_shortcode_status(short_code, bot_id, bypass_cache).await.0
+}
+
+/// [`resolve_shortcode()`] that ALSO reports the last origin HTTP status
+/// (`0` = never completed, `200` = a cached hit).
+///
+/// The music route needs "the origin is BUSY" apart from "no such track". The
+/// plugin answers `503 Server busy resolving file` with `retry_after: 5` while a
+/// Telegram relay runs for that code, and the fast ladder below (1.2/1.5/1.5 s)
+/// is entirely inside that window — so a busy origin reached the music client as
+/// `404 Track not found` and the track was skipped. Measured live: four 503s in
+/// 4.3 s, then `{"error":"Track not found"}`; the same code resolved in one try a
+/// minute later.
+pub async fn resolve_shortcode_status(
+    short_code: &str,
+    bot_id: &str,
+    bypass_cache: bool,
+) -> (Value, u16) {
     let mut bot = bot_id.trim().to_string();
     if bot.is_empty() {
         bot = get_bot_id();
         if bot.is_empty() {
-            return resolve_shortcode_concurrent(short_code, &[]).await;
+            return (resolve_shortcode_concurrent(short_code, &[]).await, 0);
         }
     }
     if !bypass_cache {
         if let Some(cached) = resolve_shortcode_cached(short_code, &bot) {
-            return cached;
+            return (cached, 200);
         }
     }
 
@@ -196,10 +214,10 @@ pub async fn resolve_shortcode(short_code: &str, bot_id: &str, bypass_cache: boo
         params.push(("nocache".to_string(), "1".to_string()));
     }
 
-    let mut res = http_json(&url, &params, "GET", 6).await;
+    let (mut res, mut status) = http_json_h_status(&url, &params, "GET", 6, &[]).await;
     if has_id(&res) {
         save_resolve_cache(short_code, &bot, &res);
-        return res;
+        return (res, status);
     }
     // An unanswered resolve used to leave no trail at all: the caller answered
     // "Track not found" and nothing said why.
@@ -208,16 +226,30 @@ pub async fn resolve_shortcode(short_code: &str, bot_id: &str, bypass_cache: boo
         &serde_json::json!({
             "short_code": short_code,
             "bot_id": bot,
+            "status": status,
             "has_size": file_size_of(&res) > 0,
             "message": res.get("message").cloned().unwrap_or(Value::Null),
         }),
     );
+    // An origin 5xx (or a request that never completed) is NOT a miss: the relay
+    // is still running and the origin advertised `retry_after: 5`. Wait that out
+    // once before the fast ladder, or a busy origin looks like a dead track.
+    if status >= 500 || status == 0 {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let (r2, s2) = http_json_h_status(&url, &params, "GET", 6, &[]).await;
+        res = r2;
+        status = s2;
+        if has_id(&res) {
+            save_resolve_cache(short_code, &bot, &res);
+            return (res, status);
+        }
+    }
     // A refusing origin is worth remembering: the prefetchers must not pile on.
     if note_resolve_rate_limit(&res.to_string()) {
-        return res;
+        return (res, status);
     }
     if not_found_result(&res) {
-        return res;
+        return (res, status);
     }
 
     // Telegram background relay was just triggered: poll 3x (1.2s, 1.5s, 1.5s).
@@ -228,16 +260,18 @@ pub async fn resolve_shortcode(short_code: &str, bot_id: &str, bypass_cache: boo
     }
     for delay in [1200u64, 1500, 1500] {
         tokio::time::sleep(Duration::from_millis(delay)).await;
-        res = http_json(&url, &retry, "GET", 6).await;
+        let (r, s) = http_json_h_status(&url, &retry, "GET", 6, &[]).await;
+        res = r;
+        status = s;
         if has_id(&res) {
             save_resolve_cache(short_code, &bot, &res);
-            return res;
+            return (res, status);
         }
         if not_found_result(&res) {
-            return res;
+            return (res, status);
         }
     }
-    res
+    (res, status)
 }
 
 /// `fd_resolve_shortcode_concurrent()`: the PHP races candidate bots with

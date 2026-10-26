@@ -6,6 +6,29 @@ All notable changes to the PencariMovie Server / Downloader project will be docu
 
 ### Fixed
 
+- **A busy origin no longer reads as "this track/file is gone".** `/resolve-file`
+  answers `503 Server busy resolving file` (with `retry_after: 5`) while a
+  Telegram relay runs for that bot+code, and `http_json()` collapses every 5xx
+  into an empty object — so `/music/stream/<code>` answered
+  `404 {"error":"Track not found"}` and `/stream/movie/pm_file_<code>` rendered
+  the "File could not be resolved" card, both after only ~4 s of retries (all
+  inside the busy window). Measured live: four 503s in 4.3 s, then `Track not
+found`; the same code resolved in one call a minute later.
+  - [`http_json_h_status()`](src/httpc.rs:1) reports the status alongside the
+    body; `http_json()`/`http_json_h()` are unchanged wrappers.
+  - [`resolve_shortcode_status()`](src/resolve.rs:1) waits out the origin's
+    advertised `retry_after` (5 s, once) before the existing fast ladder, and
+    `resolve_shortcode()` keeps its old signature.
+  - Both resolve-consuming routes now answer **503 + `Retry-After: 5`** instead
+    of a not-found answer when the last origin status was 5xx or the request
+    never completed: [`eclipse_stream()`](src/routes.rs:1) and the direct
+    `pm_file_` branch of `/stream/*` (which used to answer "File could not be
+    resolved"). A genuinely missing item still answers 404 / the card.
+  - Pinned by `tools\probe_music_busy_origin.mjs` (stub origin via
+    `FD_WP_API_BASE`: busy → 503 + Retry-After, 5 s busy → the track plays,
+    movie item → 503 not a dead card) and `tools\probe_music_resolve.mjs`
+    (live: search → stream → media bytes).
+
 - **Removing the primary bot no longer ends in an endless "Provisioning guest
   bot..." spinner.** The Bot Pool trash button always re-ran the session check,
   so removing the last bot dropped the dashboard into guest provisioning — and a
