@@ -74,7 +74,7 @@ pub fn resolve_shortcode_cached(short_code: &str, bot_id: &str) -> Option<Value>
     // `{"error":"Track not found"}` in **4.6 ms** for a code the origin resolves
     // perfectly. A real resolve always knows the size AND the file name, so
     // anything less is a MISS and gets resolved again.
-    if has_id(&hit) && file_size_of(&hit) > 0 && !jstr(&hit, "title").is_empty() {
+    if has_id(&hit) && file_size_of(&hit) > 0 && !title_of(&hit).is_empty() {
         Some((*hit).clone())
     } else {
         None
@@ -83,6 +83,24 @@ pub fn resolve_shortcode_cached(short_code: &str, bot_id: &str) -> Option<Value>
 
 fn jstr(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").trim().to_string()
+}
+
+/// The name a resolve is USABLE by: `title`, else `file_name`.
+///
+/// A stale-refresh answer (`refreshed:1`) carries the fresh id and the real
+/// `file_size`, but its `title` comes from `tg_file_new` and music rows simply do
+/// not have one. Requiring `title` alone dropped those ids on the floor: the
+/// origin had just minted a working reference, the engine refused to keep it, and
+/// the next Play re-resolved a code it had already answered. `file_name` is the
+/// same fact under a different key, and both consumers already fall back to it —
+/// the stream builder and the eclipse builder in [`crate::routes`] each read
+/// `title` and then `file_name`.
+fn title_of(v: &Value) -> String {
+    let t = jstr(v, "title");
+    if !t.is_empty() {
+        return t;
+    }
+    jstr(v, "file_name")
 }
 
 fn file_size_of(v: &Value) -> u64 {
@@ -103,7 +121,7 @@ pub fn save_resolve_cache(short_code: &str, bot_id: &str, data: &Value) {
     // be persisted as a resolve (see `resolve_shortcode_cached`). The id is
     // still returned to the caller and the origin keeps it in `tg_file_id`, so
     // the next single resolve is instant.
-    if file_size_of(data) == 0 || jstr(data, "title").is_empty() {
+    if file_size_of(data) == 0 || title_of(data).is_empty() {
         log(
             "not caching an id-only answer as a resolve",
             &serde_json::json!({
@@ -111,6 +129,7 @@ pub fn save_resolve_cache(short_code: &str, bot_id: &str, data: &Value) {
                 "bot_id": bot_id,
                 "has_size": file_size_of(data) > 0,
                 "has_title": !jstr(data, "title").is_empty(),
+                "has_file_name": !jstr(data, "file_name").is_empty(),
             }),
         );
         return;
@@ -186,7 +205,58 @@ pub async fn resolve_shortcode(short_code: &str, bot_id: &str, bypass_cache: boo
 /// `404 Track not found` and the track was skipped. Measured live: four 503s in
 /// 4.3 s, then `{"error":"Track not found"}`; the same code resolved in one try a
 /// minute later.
+///
+/// Hard-bounded by [`RESOLVE_BUDGET`]: a ladder that runs out of time answers
+/// status `0`, which both callers already read as "origin busy" → 503 +
+/// `Retry-After`, instead of hanging into the router's own kill.
 pub async fn resolve_shortcode_status(
+    short_code: &str,
+    bot_id: &str,
+    bypass_cache: bool,
+) -> (Value, u16) {
+    match tokio::time::timeout(
+        RESOLVE_BUDGET,
+        resolve_shortcode_status_inner(short_code, bot_id, bypass_cache),
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(_) => {
+            log(
+                "resolve budget exceeded - answering busy instead of hanging",
+                &serde_json::json!({
+                    "short_code": short_code,
+                    "bot_id": bot_id,
+                    "budget_secs": RESOLVE_BUDGET.as_secs(),
+                    "bypass_cache": bypass_cache,
+                }),
+            );
+            (
+                serde_json::json!({
+                    "ok": 0,
+                    "message": "The origin is busy resolving this file. Retry in a few seconds.",
+                }),
+                0,
+            )
+        }
+    }
+}
+
+/// How long ONE `/resolve-file` ladder may occupy a request.
+///
+/// Heroku kills a request at 30 s (`H12`, then a 503 with no body — indistinguishable
+/// from a dead file). The ladder in [`resolve_shortcode_status_inner`] costs, in the
+/// worst case where the origin times out on every rung:
+/// `6 + 5 + 6 + (1.2+6) + (1.5+6) + (1.5+6) ≈ 39 s`. One Play can trigger that
+/// twice (the foreground resolve plus `/api/download`'s own refresh), which is
+/// exactly the steady 3–6 `503` per concurrency level the stress run recorded —
+/// including the warm-up, where 2 of 20 URLs died at 30.8 s each. 20 s leaves the
+/// router headroom to send the answer.
+const RESOLVE_BUDGET: Duration = Duration::from_secs(20);
+
+/// The body of [`resolve_shortcode_status()`]. Deliberately unbounded: the budget
+/// lives in the wrapper so there is exactly one place that can end a ladder early.
+async fn resolve_shortcode_status_inner(
     short_code: &str,
     bot_id: &str,
     bypass_cache: bool,
@@ -278,23 +348,72 @@ pub async fn resolve_shortcode_status(
 /// `curl_multi` and returns the first winner. This port walks the same
 /// candidate order serially — identical results, and it avoids N concurrent
 /// WordPress calls from one request (which the origin rate-limits).
+///
+/// Bounded by [`RESOLVE_BUDGET`] exactly like [`resolve_shortcode_status`], and
+/// for the same reason: this is the fan-out every caller reaches when it has no
+/// bot id, so `N bots × one budgeted attempt` was still an UNBOUNDED request.
+/// Measured against an unreachable origin, `/api/resolve-shortcode` hung for
+/// **76 s** — far past the router's 30 s kill — because the per-attempt budget
+/// bounded each bot and never the walk.
 pub async fn resolve_shortcode_concurrent(short_code: &str, candidates: &[String]) -> Value {
-    let mut bots: Vec<String> = candidates.to_vec();
-    if bots.is_empty() {
-        if let Some(picked) = pick_pool_bot() {
-            let id = picked.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
-            if !id.is_empty() {
-                bots.push(id.to_string());
-            }
+    match tokio::time::timeout(
+        RESOLVE_BUDGET,
+        resolve_shortcode_concurrent_inner(short_code, candidates),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => {
+            log(
+                "concurrent resolve budget exceeded - answering busy instead of hanging",
+                &serde_json::json!({
+                    "short_code": short_code,
+                    "budget_secs": RESOLVE_BUDGET.as_secs(),
+                }),
+            );
+            serde_json::json!({
+                "ok": 0,
+                "message": "The origin is busy resolving this file. Retry in a few seconds.",
+            })
+        }
+    }
+}
+
+async fn resolve_shortcode_concurrent_inner(short_code: &str, candidates: &[String]) -> Value {
+    // The candidate ORDER is a cache decision, not a load-balancing one.
+    //
+    // A `file_id` is bot-specific and `resolve_shortcode_cached()` is keyed
+    // `short_code:bot_id`, so whichever bot answers FIRST is the bot every later
+    // request has to ask. This used to start at `pick_pool_bot()`, which
+    // round-robins: consecutive resolves of the same code each picked a different
+    // bot and each missed the row the previous one had just written. Measured on
+    // 2026-10-26 against a fresh cache — one code, three requests, **three
+    // different file_ids** in 468/159/13632 ms, while the same code with the
+    // active bot pinned answered the IDENTICAL id in 5 ms and 3 ms.
+    //
+    // So: explicit candidates first (a caller that names bots owns the order),
+    // then the ACTIVE bot — what the single-bot path and every `/stream` already
+    // use — and only then the pool rotation as fallback.
+    let mut bots: Vec<String> = Vec::new();
+    for c in candidates {
+        let c = c.trim();
+        if !c.is_empty() && !bots.iter().any(|b| b == c) {
+            bots.push(c.to_string());
         }
     }
     let active = get_bot_id();
-    if !active.is_empty() && !bots.contains(&active) {
+    if !active.is_empty() && !bots.iter().any(|b| b == &active) {
         bots.push(active);
+    }
+    if let Some(picked) = pick_pool_bot() {
+        let id = picked.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
+        if !id.is_empty() && !bots.iter().any(|b| b == id) {
+            bots.push(id.to_string());
+        }
     }
     for b in get_bot_pool() {
         let id = b.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
-        if !id.is_empty() && !bots.contains(&id.to_string()) {
+        if !id.is_empty() && !bots.iter().any(|b| b == id) {
             bots.push(id.to_string());
         }
     }
@@ -634,5 +753,34 @@ mod tests {
         );
         assert!(cache::get("resolve", &key).is_some(), "the raw entry is there");
         assert!(resolve_shortcode_cached("poison1", "test-bot").is_none());
+    }
+
+    /// A stale-refresh answer carries the fresh id, a real `file_size` and a
+    /// `file_name`, but no catalog `title` (music rows have none). Requiring
+    /// `title` alone dropped the id the origin had just minted, so the next Play
+    /// re-resolved a code that was already answered.
+    #[test]
+    fn a_refresh_row_with_a_file_name_is_usable_without_a_title() {
+        let refreshed = serde_json::json!({
+            "ok": 1, "file_id_mt": "AQADrefreshed", "refreshed": 1,
+            "file_size": 4372611, "file_name": "03.SZA.Kill.Bill.flac",
+            "mime": "audio/x-flac"
+        });
+        save_resolve_cache("refresh1", "test-bot", &refreshed);
+        let hit = resolve_shortcode_cached("refresh1", "test-bot")
+            .expect("an id with a size and a file name is a usable resolve");
+        assert_eq!(hit["file_name"], "03.SZA.Kill.Bill.flac");
+    }
+
+    /// The gate is `a size AND a name`. An id with neither is still a MISS, or
+    /// `/eclipse/stream` answers "Track not found" in 4.6 ms again
+    /// (see `a_batch_row_is_never_cached_as_a_resolve`).
+    #[test]
+    fn an_id_without_a_size_or_a_name_is_still_refused() {
+        let id_only = serde_json::json!({
+            "ok": 1, "file_id_mt": "AQADnoname", "file_size": 1234, "title": ""
+        });
+        save_resolve_cache("noname1", "test-bot", &id_only);
+        assert!(resolve_shortcode_cached("noname1", "test-bot").is_none());
     }
 }
