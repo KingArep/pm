@@ -24,7 +24,12 @@ unsupported`). [`deploy-heroku.yml`](.github/workflows/deploy-heroku.yml:1)
   dispatches `release.yml`: it promotes the `image` input when given, else the
   `:sha-<7>` of the commit the run was started on, and fails naming that tag
   when it is not published — instead of rebuilding, or silently falling back to
-  `:native`.
+  `:native`. The `git push heroku` fallback is gone with it: Heroku's classic
+  Docker builder rejects this repo's `Dockerfile` outright (`RUN
+  --mount=type=cache` → "the --mount option requires BuildKit"), so that path
+  only ever added a second, slower failure after the real one. The promotion
+  itself also has to ask for `repo@digest`, not `repo:tag@digest` — skopeo
+  refuses a reference carrying both.
 
 - **The sponsored item is now `streams[0]` on EVERY `/stream/*` answer.** Only
   [`finish_streams()`](src/routes.rs:1) used to prepend it, so every answer that

@@ -24,6 +24,12 @@ name: Deploy to Heroku
 # it looked for — publish with "Release Builder & Docker Publish" first, then
 # run this workflow again.
 #
+# There is also no `git push heroku` fallback: Heroku's classic Docker builder
+# cannot build this repo's `Dockerfile` at all (`RUN --mount=type=cache` →
+# "the --mount option requires BuildKit"), so that path only ever produced a
+# second, slower failure after the real one. A failed promotion is now exactly
+# one red step with the registry error in it.
+#
 # Required repository secret: HEROKU_API_KEY
 #   Get it with `heroku authorizations:create -d "github-actions pm-server"`
 #   or from https://dashboard.heroku.com/account/applications
@@ -65,12 +71,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          # The Heroku git fallback below needs a full clone.
-          fetch-depth: 0
-
+      # No checkout: this job only talks to two registries and the Heroku API.
       # Fail fast with a clear message instead of a confusing auth error.
       - name: Check for HEROKU_API_KEY
         run: |
@@ -180,7 +181,11 @@ jobs:
               "$REF" 2>/dev/null |
               awk '$1 == "linux/amd64" { print $2; exit }' || true
           )"
-          if [ -n "$AMD64" ]; then SRC="${REF}@${AMD64}"; else SRC="$REF"; fi
+          # `repo@digest`, never `repo:tag@digest`: skopeo rejects a reference
+          # that carries both ("Docker references with both a tag and digest are
+          # currently not supported"). `${REF%:*}` drops the tag, and the repo
+          # itself carries no colon (ghcr.io/<owner>/<repo>).
+          if [ -n "$AMD64" ]; then SRC="${REF%:*}@${AMD64}"; else SRC="$REF"; fi
           echo "Promoting ${SRC}"
           echo "       -> ${DST}"
 
@@ -220,37 +225,6 @@ jobs:
           heroku container:release web -a "$HEROKU_APP"
           echo "--- recent releases"
           heroku releases -a "$HEROKU_APP" --num 3 || true
-
-      # Fallback: the image exists but the registry push was rejected -> let
-      # Heroku build from this commit. Slow, and `build.rs` has no tags there
-      # (so the version reads as CARGO_PKG_VERSION), but it keeps a manual
-      # deploy from ending with nothing live.
-      - name: Deploy by building on Heroku (fallback)
-        if: steps.image.outcome != 'success'
-        env:
-          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
-        run: |
-          echo "::notice::No pinned image; building on Heroku instead."
-          set -euo pipefail
-
-          # Heroku authenticates with the API key as the password and any
-          # non-empty username. Keeping it in an env var (never in the URL on
-          # disk) avoids leaking it into git config / process listings.
-          git remote add heroku "https://heroku:${HEROKU_API_KEY}@git.heroku.com/${HEROKU_APP}.git"
-
-          # Deploy the exact commit CI checked out.
-          git push --force heroku "HEAD:refs/heads/main"
-
-          if curl -sS --max-time 30 \
-               -H "Accept: application/vnd.heroku+json; version=3" \
-               -H "Authorization: Bearer ${HEROKU_API_KEY}" \
-               "https://api.heroku.com/apps/${HEROKU_APP}/releases" \
-               -o /tmp/releases.json; then
-            grep -o '"version":[0-9]*' /tmp/releases.json | head -n 1 || true
-          else
-            echo "Deploy succeeded; release lookup was skipped."
-          fi
-          echo "Deployed ${HEROKU_APP} at commit ${GITHUB_SHA}."
 
       # ── prove what is actually running ─────────────────────────────────────
       # The whole point of this workflow is "the commit reached production", so
