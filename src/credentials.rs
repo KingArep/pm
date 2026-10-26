@@ -348,10 +348,19 @@ pub async fn ensure_enrolled_throttled() -> bool {
 }
 
 pub async fn ensure_enrolled() -> bool {
+    // NEVER gate enrolment on a bot id. The token is install-wide (`bot_id: 0`), so
+    // needing a bot here was pointless — and actively harmful: when the pool was
+    // emptied (the user removing the last bot while testing "Disconnect All"),
+    // `get_bot_id()` came back empty, this returned false WITHOUT A LOG LINE and
+    // without a single request, so every `/resolve-file` went out unauthenticated
+    // and answered 401. That is the exact shape of the phone log: 401s with no
+    // "re-enrolling" and no "enrol failed" beside them.
     let bot = crate::session::get_bot_id();
     if bot.is_empty() {
-        // Nothing to scope a token to yet: the lease path will enrol.
-        return false;
+        crate::log::stderr_log(
+            "pm-auth enrol has no active bot, enrolling install-wide",
+            Some(&serde_json::json!({"bot_id": ""})),
+        );
     }
     if !auth_token().is_empty() {
         return true;
