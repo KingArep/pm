@@ -361,7 +361,14 @@ pub async fn ensure_enrolled() -> bool {
     let params = vec![
         ("install_pub".to_string(), b64u(pk)),
         ("device_id".to_string(), crate::diagnostics::get_device_id()),
-        ("bot_id".to_string(), bot),
+        // bot_id 0 = install-wide. A BOT-SCOPED token cannot serve a pool: the
+        // download path resolves with whichever pool bot it picked, and the origin
+        // refuses a token minted for a different one (measured on this box: 401 for
+        // bot 8899157874 while the token named 8469916399, so half the streams
+        // answered `400 MISSING_FILE_ID`). The token is already bound to a private
+        // key that never leaves the device, and revocation is per install, so the
+        // bot id adds nothing a pool can live with.
+        ("bot_id".to_string(), "0".to_string()),
     ];
     // Boxed: http_json -> http_json_h -> ensure_enrolled_throttled -> here, so the
     // future would otherwise be infinitely sized (E0733: "recursion in an async fn
