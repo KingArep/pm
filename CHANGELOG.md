@@ -14,12 +14,13 @@ All notable changes to the PencariMovie Server / Downloader project will be docu
   candidates from both sides of the episode marker and accepted the
   post-marker text as a title, so the file's own show name (the text BEFORE
   `S01E01`) was ignored. `after_ep` now only stands in for the title when the
-  pre-marker part is a channel/uploader tag or absent — the `CDL.E01.The.Rebel.
-Princess` / `DramaOST.E01.The.Witch` / `E01.The.Witch` shape the port exists
-  for — and the multi-word phrase search runs over the title region instead of
-  the whole file name (`Other.Show.S01E01.My.Demon` is not "My Demon").
-  `legacy/php/backend.php:9386` has the same hole (`array_filter([$baseF,
-$afterEp])`), so this is a deliberate divergence from the archived engine.
+  pre-marker part is a channel/uploader tag or absent — the
+  `CDL.E01.The.Rebel.Princess` / `DramaOST.E01.The.Witch` / `E01.The.Witch` shape
+  the port exists for — and the multi-word phrase search runs over the title
+  region instead of the whole file name (`Other.Show.S01E01.My.Demon` is not
+  "My Demon"). `legacy/php/backend.php:9386` has the same hole
+  (`array_filter([$baseF, $afterEp])`), so this is a deliberate divergence from
+  the archived engine.
   Pinned by `matcher::tests::series_does_not_take_a_foreign_episode_name_as_its_title`
   (3 rejected rows + 17 kept rows, taken verbatim from the live answer) and
   re-checked against every existing series rule (`series_keeps_embedded_year`,

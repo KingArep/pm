@@ -1001,10 +1001,28 @@ pub fn series_file_matches_title(
         after_ep = squash(&after);
     }
 
+    const UPLOADER_SUFFIX: &str = "(?i)^(?:(?:sklink|office|movie|movies|king|film|films|cinema|cinemas|media|channel|tv|tele|tg|hub|world|zone|group|team|club|gang|bot|vip|official|download|downloads|upload|uploads|site|store|station|blasters|rockers|wap|villa|dub|yogi|verse|flix|pahe|galaxy|pms|mkv|link|links|hd|nunadrama|drakor|drama|adrama|lovers|queendramainfo)\\b\\s*)+$";
+
+    // ── the post-episode text is the EPISODE-TITLE slot ─────────────────────
+    //
+    // `Im.Not.Afraid.S01E01.The.Witch.1080p.NF.WEB.DL…` is **I'm Not Afraid**,
+    // whose S01E01 happens to be *titled* "The Witch". Taking `after_ep` as a
+    // candidate title let that file join "The Witch 2025" — three foreign
+    // episodes in one list. The owning show is whatever precedes the marker;
+    // `after_ep` may only stand in for the title when there IS no real phrase
+    // before the marker, i.e. the prefix is a channel/uploader tag
+    // (`CDL.E01.The.Rebel.Princess`, `DramaOST.E01.The.Witch`, `E01.The.Witch`)
+    // — the exact shape Pattern B exists for.
+    let after_ep_is_title_slot = {
+        let words = base_f.split_whitespace().count();
+        words <= 1 || (!base_f.is_empty() && has(UPLOADER_SUFFIX, &base_f))
+    };
+    let after_ep_title: &str = if after_ep_is_title_slot { after_ep.as_str() } else { "" };
+
     // Strict leading-"The" check. NOTE it is also the discriminator that the
     // single-word foreign-indicator guard below relies on.
     let has_leading_the = target_lower.starts_with("the ");
-    let file_has_leading_the = base_f.starts_with("the ") || after_ep.starts_with("the ");
+    let file_has_leading_the = base_f.starts_with("the ") || after_ep_title.starts_with("the ");
     if has_leading_the != file_has_leading_the {
         return false;
     }
@@ -1048,11 +1066,10 @@ pub fn series_file_matches_title(
     if !base_f.is_empty() {
         candidates.push(base_f.clone());
     }
-    if !after_ep.is_empty() {
-        candidates.push(after_ep.clone());
+    if !after_ep_title.is_empty() {
+        candidates.push(after_ep_title.to_string());
     }
 
-    const UPLOADER_SUFFIX: &str = "(?i)^(?:(?:sklink|office|movie|movies|king|film|films|cinema|cinemas|media|channel|tv|tele|tg|hub|world|zone|group|team|club|gang|bot|vip|official|download|downloads|upload|uploads|site|store|station|blasters|rockers|wap|villa|dub|yogi|verse|flix|pahe|galaxy|pms|mkv|link|links|hd|nunadrama|drakor|drama|adrama|lovers|queendramainfo)\\b\\s*)+$";
     for tgt in [target_lower.as_str(), target_no_the.as_str()] {
         if tgt.is_empty() {
             continue;
@@ -1063,7 +1080,7 @@ pub fn series_file_matches_title(
                 candidates.push(tgt.to_string());
             }
         }
-        if let Some(prefix) = after_ep.strip_suffix(&format!(" {}", tgt)) {
+        if let Some(prefix) = after_ep_title.strip_suffix(&format!(" {}", tgt)) {
             let prefix = prefix.trim();
             if !prefix.is_empty() && has(UPLOADER_SUFFIX, prefix) {
                 candidates.push(tgt.to_string());
@@ -1105,13 +1122,30 @@ pub fn series_file_matches_title(
     }
 
     if content_words.len() >= 2 {
+        // Searched in the TITLE region only, never the whole file name: a
+        // foreign show's episode title sitting after `SxxExx` is not this
+        // entry's name ("Other.Show.S01E01.My.Demon" is not "My Demon").
+        //
+        // When the post-marker text is not a title slot, the region is the file
+        // name UP TO the marker — still the full pre-marker text, because
+        // `base_f` is truncated at the first 4-digit number and would lose a
+        // title with a year EMBEDDED in it ("Kudrat.1968.High.Council.2026.EP1"
+        // → base_f "kudrat").
+        let title_region = if after_ep_is_title_slot {
+            f_clean_norm.clone()
+        } else {
+            match span(EP_PATTERN, &f_clean_norm) {
+                Some((_, end)) => f_clean_norm.get(..end).unwrap_or("").to_string(),
+                None => f_clean_norm.clone(),
+            }
+        };
         let q = format!("\\b{}\\b", escape(&target_lower));
         let q_no_the = if target_no_the.is_empty() {
             None
         } else {
             Some(format!("\\b{}\\b", escape(&target_no_the)))
         };
-        if has(&q, &f_clean_norm) || q_no_the.as_deref().is_some_and(|p| has(p, &f_clean_norm)) {
+        if has(&q, &title_region) || q_no_the.as_deref().is_some_and(|p| has(p, &title_region)) {
             return true;
         }
 
@@ -2300,6 +2334,93 @@ mod tests {
             "2026",
             "",
             &["Something New".to_string()]
+        ));
+    }
+
+    /// Reported leak: "The Witch" (2025) listed three episodes of **I'm Not
+    /// Afraid**, whose S01E01 is simply *titled* "The Witch".
+    ///
+    /// `Im.Not.Afraid.S01E01.The.Witch…` puts the OWNING show before the episode
+    /// marker (`im not afraid`) and a FOREIGN show's name in the episode-title
+    /// slot. The post-episode text (`after_ep`) is therefore only allowed to
+    /// supply the title when the pre-episode part is a channel/uploader tag
+    /// (`CDL.E01.The.Rebel.Princess`, `DramaOST.E01.The.Witch`), never when it is
+    /// a real multi-word phrase — that phrase is the file's own series name.
+    #[test]
+    fn series_does_not_take_a_foreign_episode_name_as_its_title() {
+        for file in [
+            "Im.Not.Afraid.S01E01.The.Witch.1080p.NF.WEB.DL.DDP5.1.Atmos.DV.HDR.mkv",
+            "Im.Not.Afraid.S01E01.The.Witch.1080p.NF.WEB.DL.DDP5.1.Atmos.AV1.mkv",
+            "Im.Not.Afraid.S01E01.The.Witch.1080p.NF.WEB.DL.DD.2B5.1.Atmos.H.mkv",
+        ] {
+            assert!(
+                !series_file_matches_title(file, "The Witch 2025", 1, 1, "2025", "", &[]),
+                "LEAK: {file} belongs to I'm Not Afraid, not The Witch"
+            );
+        }
+
+        // The same shape with a multi-word title: the whole-name phrase search
+        // must not find "my demon" inside another show's episode title either.
+        assert!(!series_file_matches_title(
+            "Other.Show.S01E01.My.Demon.1080p.NF.WEB.DL.x264.mkv",
+            "My Demon 2023",
+            1,
+            1,
+            "2023",
+            "",
+            &[]
+        ));
+
+        // Controls — the rest of the S01E01 list the live server answered for
+        // `pm:post:8798831284` ("The Witch 2025"). Every one of these IS an
+        // episode of The Witch and must survive the tightening above.
+        for file in [
+            "The.Witch.EP1.1080p.MalaySub.mp4",
+            "The.Witch.2025.EP1.720p.AAC.x264.Me&Friend.mp4",
+            "The.Witch.EP1.MalaySub.mp4",
+            "The.Witch.2025.EP01.MalaySub.mp4",
+            "The.Witch.S01E01.The.Female.Student.1080p.NF.WEB.DL.x265.mkv",
+            "The.Witch.S01E01.1080p.VIKI.WEB.DL.AAC2.0.x264.CPTN5.mkv",
+            "The.Witch.S01E01.720p.VIKI.WEB.DL.AAC2.0.x264.CPTN5D.mkv",
+            "The.Witch.S01E01.The.Female.Student.720p.NF.WEB.DL.x.mkv",
+            "The.Witch.2025.S01E01.720p.WEB.DL.Korean.with.Hindi.Eng.Sub.mkv",
+            "The.Witch.S01E01.NF.x264.1080p.mkv",
+            "The.Witch.2025.S01E01.480p.WEB.DL.Korean.with.Hindi.Eng.Sub.mkv",
+            // Post-episode title with NO pre-episode prefix at all.
+            "E01.The.Witch.540p.ICONFLIX.mkv",
+            // Post-episode title behind a known uploader/site tag.
+            "DramaOST.E01.The.Witch.1080p.WEB.DL.viki.mkv",
+            "DramaOST.E01.The.Witch.720p.WEB.DL.viki.mkv",
+            "DramaOST.E01.The.Witch.480p.WEB.DL.viki.mkv",
+            "OLD.E01.The.Witch.2025.mp4",
+            "ADrama.Lovers.EP01.The.Witch.2025.720p.HDTV.mkv",
+        ] {
+            assert!(
+                series_file_matches_title(file, "The Witch 2025", 1, 1, "2025", "", &[]),
+                "{file} is an episode of The Witch and must stay in the list"
+            );
+        }
+
+        // Pattern B with an unknown channel tag must survive: the PHP names
+        // `CDL.E01.The.Rebel.Princess` / `YDF.E01.…` as the whole reason
+        // `after_ep` is consulted at all.
+        assert!(series_file_matches_title(
+            "CDL.E01.The.Rebel.Princess.2021.mp4",
+            "The Rebel Princess 2021",
+            1,
+            1,
+            "2021",
+            "",
+            &[]
+        ));
+        assert!(series_file_matches_title(
+            "YDF.E01.The.Rebel.Princess.mp4",
+            "The Rebel Princess 2021",
+            1,
+            1,
+            "2021",
+            "",
+            &[]
         ));
     }
 
