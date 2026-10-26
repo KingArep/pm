@@ -216,6 +216,16 @@ pub struct WpFile {
     /// `thumbnail_url` — the poster a Telegram-FILE catalog row shows
     /// (backend.php:15829 `'poster' => $fThumb`). Empty for post files.
     pub thumbnail: String,
+    /// `added_date` — Unix SECONDS for when the origin created this file row. A
+    /// STRING on the wire (`"1792386106"`), a number on some rows, and absent on
+    /// older ones.
+    ///
+    /// This is the only date the source actually stores, and the PHP used it
+    /// verbatim as a Stremio episode's `released` (backend.php:16273 / 16322).
+    /// The port dropped the field and stamped `date(...)` — i.e. the wall clock —
+    /// instead, so every episode of every series reported "released just now"
+    /// and the `/meta` body changed on each request (issue #10). `0` = absent.
+    pub added_date: i64,
 }
 
 pub fn wp_file_from(v: &Value) -> Option<WpFile> {
@@ -253,8 +263,17 @@ pub fn wp_file_from(v: &Value) -> Option<WpFile> {
         .unwrap_or("")
         .trim()
         .to_string();
-    // `duration` is a number on some rows and a string on others; `part` only
-    // appeared in 2026-10 and is absent from most rows, so both are optional.
+    // `added_date` is a STRING of Unix seconds on the real rows; `duration` is a
+    // number on some rows and a string on others; `part` only appeared in
+    // 2026-10 and is absent from most rows, so all three are optional.
+    let added_date = v
+        .get("added_date")
+        .and_then(|x| {
+            x.as_i64()
+                .or_else(|| x.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+        })
+        .filter(|n| *n > 0)
+        .unwrap_or(0);
     let duration = v
         .get("duration")
         .and_then(|x| {
@@ -275,6 +294,7 @@ pub fn wp_file_from(v: &Value) -> Option<WpFile> {
         duration,
         part: json_i32(v, "part"),
         thumbnail,
+        added_date,
     })
 }
 

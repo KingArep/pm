@@ -6,6 +6,49 @@ All notable changes to the PencariMovie Server / Downloader project will be docu
 
 ### Fixed
 
+- **A series list can no longer adopt another show's EPISODE TITLE as its own
+  name.** `/stream/series/pm:post:8798831284.json` ("The Witch 2025") served
+  three episodes of **I'm Not Afraid**:
+  `Im.Not.Afraid.S01E01.The.Witch.1080p.NF.WEB.DL…` — I'm Not Afraid's S01E01
+  just happens to be _titled_ "The Witch". The matcher built its title
+  candidates from both sides of the episode marker and accepted the
+  post-marker text as a title, so the file's own show name (the text BEFORE
+  `S01E01`) was ignored. `after_ep` now only stands in for the title when the
+  pre-marker part is a channel/uploader tag or absent — the `CDL.E01.The.Rebel.
+Princess` / `DramaOST.E01.The.Witch` / `E01.The.Witch` shape the port exists
+  for — and the multi-word phrase search runs over the title region instead of
+  the whole file name (`Other.Show.S01E01.My.Demon` is not "My Demon").
+  `legacy/php/backend.php:9386` has the same hole (`array_filter([$baseF,
+$afterEp])`), so this is a deliberate divergence from the archived engine.
+  Pinned by `matcher::tests::series_does_not_take_a_foreign_episode_name_as_its_title`
+  (3 rejected rows + 17 kept rows, taken verbatim from the live answer) and
+  re-checked against every existing series rule (`series_keeps_embedded_year`,
+  `series_glory_cases_from_php_regression_suite`, …).
+
+- **A series' episodes no longer report "released just now", and the episode list
+  is ordered.** `/meta/series/pm:post:<id>.json` stamped every `released` with
+  `Utc::now()` at serialisation, so the value tracked the request clock — three
+  requests 7 s apart returned `16:14:12Z`, `16:14:19Z`, `16:14:26Z` for the same
+  episode — and every episode of a 2018 series claimed the current date. The
+  `videos` array was also left in raw scan order (11 of 12 K-drama series
+  scrambled or descending), because the PHP's explicit
+  `usort(season, episode)` (backend.php:16339-16348) was never ported.
+  - [`WpFile.added_date`](src/wp_data.rs:196) now carries the origin's own Unix
+    timestamp (`"1792386106"` — a STRING on the wire), the same field the PHP
+    used as `released` before the port dropped it.
+  - [`series_videos()`](src/routes.rs:5306) emits that stored date, falls back to
+    the series anchor (the post's publish date, else `{year}-01-01`), and emits
+    `null` — never a fabricated "now" — when the post has no date at all:
+    clients sort on the field, so a moving value is worse than an absent one.
+  - The same builder sorts by `(season, episode)` ascending, so next-episode and
+    autoplay can no longer advance to the wrong episode.
+  - Pinned by `routes::tests::episode_released_is_stored_not_the_wall_clock`,
+    `…::series_videos_are_sorted_by_season_then_episode`,
+    `…::series_anchor_prefers_the_post_date_over_the_year` and
+    `…::iso_from_wp_date_reads_the_origin_format`; reproduced and re-verified
+    live with `node tools/probe_issue10.mjs` (36/36 series across kdrama, malay
+    and anime: 0 moved, 0 near the clock, 36/36 ascending).
+
 - **An AAC `.m4a` is no longer pulled in full before the server admits it cannot
   transcode it.** The device log (CPH2581, 1.0.86) said
   `alac probe rejected the file … no decoder for codec CodecType(4100)` — and

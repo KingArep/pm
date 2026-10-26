@@ -5213,9 +5213,8 @@ fn file_meta_pills(title: &str, size: u64) -> Vec<String> {
     pills
 }
 
-/// `date('Y-m-d\TH:i:s\Z')` in UTC, without a date crate.
-fn iso_now() -> String {
-    let secs = crate::storage::now();
+/// `date('Y-m-d\TH:i:s\Z', $secs)` in UTC, without a date crate.
+fn iso_from_unix(secs: i64) -> String {
     let days = secs.div_euclid(86400);
     let rem = secs.rem_euclid(86400);
     let z = days + 719468;
@@ -5239,6 +5238,119 @@ fn iso_now() -> String {
         (rem % 3600) / 60,
         rem % 60
     )
+}
+
+/// A WordPress `date` (`2024-02-19 20:01:04`) as RFC3339 UTC.
+///
+/// The origin sends site-local time with no zone; it is read here at day
+/// granularity for a Stremio `released`, so the value is emitted as `Z` rather
+/// than guessed into an offset. `None` when the string does not start with a
+/// real date.
+fn iso_from_wp_date(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let b = raw.as_bytes();
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let y: i32 = raw.get(0..4)?.parse().ok()?;
+    let mo: u32 = raw.get(5..7)?.parse().ok()?;
+    let d: u32 = raw.get(8..10)?.parse().ok()?;
+    if !(1900..=2999).contains(&y) || !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // `[ T]HH:MM:SS` when a time follows the date, midnight otherwise.
+    let (h, mi, s) = match raw.get(11..19) {
+        Some(t) if t.len() == 8 && t.as_bytes()[2] == b':' && t.as_bytes()[5] == b':' => (
+            t.get(0..2)?.parse::<u32>().ok()?,
+            t.get(3..5)?.parse::<u32>().ok()?,
+            t.get(6..8)?.parse::<u32>().ok()?,
+        ),
+        _ => (0, 0, 0),
+    };
+    if h > 23 || mi > 59 || s > 59 {
+        return None;
+    }
+    Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z"))
+}
+
+/// The series-level date every episode falls back to when its own file row has
+/// no `added_date`: the POST's publish date, else `{release year}-01-01`.
+///
+/// `None` when the post carries neither — the caller then emits `null`, because
+/// a fabricated "now" is worse than an absent value: clients sort on it.
+fn series_released_anchor(post: &Value) -> Option<String> {
+    if let Some(date) = iso_from_wp_date(&jstr(post, "date")) {
+        return Some(date);
+    }
+    let year = post_release_year(post);
+    if year.len() == 4 && year.chars().all(|c| c.is_ascii_digit()) {
+        return Some(format!("{year}-01-01T00:00:00Z"));
+    }
+    None
+}
+
+/// The Stremio `videos` list for one `pm:post:` series — one entry per distinct
+/// `(season, episode)` the post's own files carry.
+///
+/// Two rules, both regressions the port introduced and issue #10 reported:
+///
+///   1. `released` is the FILE's own `added_date` — a real stored date. It must
+///      never be the current clock: with every sort key equal, a client that
+///      sorts by release (or badges "new episodes") sees nonsense, and the
+///      `/meta` body differs on every request. A row without one falls back to
+///      the series anchor, and to `null` only when the post has no date at all.
+///   2. the list is sorted by `(season, episode)` ASCENDING. The PHP does this
+///      explicitly (backend.php:16339-16348, with `raw_index` as a tiebreak);
+///      the port kept the raw scan order, so the episode list rendered — and
+///      next-episode/autoplay advanced — out of order.
+fn series_videos(
+    media_id: &str,
+    files: &[crate::wp_data::WpFile],
+    poster: &Value,
+    anchor: Option<&str>,
+) -> Vec<Value> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut videos: Vec<Value> = Vec::new();
+    for f in files {
+        let (s, e, _end) = crate::matcher::classify_season_episode(
+            &f.title,
+            f.season_num,
+            f.episode_num,
+            &f.caption,
+        );
+        if e <= 0 || !seen.insert((s, e)) {
+            continue;
+        }
+        // The PHP's episode label is `S{s}E{e}` with NO zero padding.
+        let thumb = if f.thumbnail.is_empty() {
+            poster.clone()
+        } else {
+            serde_json::json!(f.thumbnail)
+        };
+        let released = if f.added_date > 0 {
+            serde_json::json!(iso_from_unix(f.added_date))
+        } else {
+            anchor.map(|a| serde_json::json!(a)).unwrap_or(Value::Null)
+        };
+        videos.push(serde_json::json!({
+            "id": format!("{}:{}:{}", media_id, s, e),
+            "name": format!("S{}E{}", s, e),
+            "season": s,
+            "episode": e,
+            "number": e,
+            "released": released,
+            "thumbnail": thumb,
+        }));
+    }
+    // `seen` already guarantees a unique (s, e) pair, so this is a total order
+    // and needs no tiebreak.
+    videos.sort_by_key(|v| {
+        (
+            v["season"].as_i64().unwrap_or(0),
+            v["episode"].as_i64().unwrap_or(0),
+        )
+    });
+    videos
 }
 
 /// `other/*` and `pm_topkw_*` rows: the origin's newest / keyword FILE lists,
@@ -5587,35 +5699,8 @@ async fn handle_meta(_ctx: &ReqCtx, path: &str) -> Response {
         }
         if item_type == "series" {
             let files = crate::wp_data::fetch_post_files_paged(pid, 200, 600, 3).await;
-            let mut seen = std::collections::BTreeSet::new();
-            let mut videos: Vec<Value> = Vec::new();
-            for f in &files {
-                let (s, e, _end) = crate::matcher::classify_season_episode(
-                    &f.title,
-                    f.season_num,
-                    f.episode_num,
-                    &f.caption,
-                );
-                if e > 0 && seen.insert((s, e)) {
-                    // The PHP's episode label is `S{s}E{e}` with NO zero padding,
-                    // and each entry carries `number`, `released` and `thumbnail`
-                    // (backend.php:16325-16336).
-                    let thumb = if f.thumbnail.is_empty() {
-                        meta["poster"].clone()
-                    } else {
-                        serde_json::json!(f.thumbnail)
-                    };
-                    videos.push(serde_json::json!({
-                        "id": format!("{}:{}:{}", id, s, e),
-                        "name": format!("S{}E{}", s, e),
-                        "season": s,
-                        "episode": e,
-                        "number": e,
-                        "released": iso_now(),
-                        "thumbnail": thumb,
-                    }));
-                }
-            }
+            let anchor = series_released_anchor(&post);
+            let mut videos = series_videos(&id, &files, &meta["poster"], anchor.as_deref());
             // A series with no resolvable episode still needs ONE entry, or
             // Stremio refuses the meta entirely (backend.php:16357-16368).
             if videos.is_empty() {
@@ -5625,7 +5710,7 @@ async fn handle_meta(_ctx: &ReqCtx, path: &str) -> Response {
                     "season": 1,
                     "episode": 1,
                     "number": 1,
-                    "released": iso_now(),
+                    "released": anchor.map(|a| serde_json::json!(a)).unwrap_or(Value::Null),
                     "thumbnail": meta["poster"].clone(),
                 }));
             }
@@ -8153,8 +8238,10 @@ mod tests {
     }
 
     #[test]
-    fn iso_now_is_rfc3339_utc() {
-        let s = iso_now();
+    fn iso_from_unix_is_rfc3339_utc() {
+        assert_eq!(iso_from_unix(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso_from_unix(1_700_000_000), "2023-11-14T22:13:20Z");
+        let s = iso_from_unix(crate::storage::now());
         assert_eq!(s.len(), 20, "{s}");
         assert!(s.ends_with('Z'), "{s}");
         assert_eq!(&s[4..5], "-");
@@ -8164,5 +8251,140 @@ mod tests {
         assert_eq!(&s[16..17], ":");
         assert!(s[11..13].parse::<u32>().unwrap() < 24, "{s}");
         assert!(s[14..16].parse::<u32>().unwrap() < 60, "{s}");
+    }
+
+    #[test]
+    fn iso_from_wp_date_reads_the_origin_format() {
+        assert_eq!(
+            iso_from_wp_date("2024-02-19 20:01:04").as_deref(),
+            Some("2024-02-19T20:01:04Z")
+        );
+        assert_eq!(
+            iso_from_wp_date("2018-05-02T09:07:06").as_deref(),
+            Some("2018-05-02T09:07:06Z")
+        );
+        // Date only -> midnight.
+        assert_eq!(
+            iso_from_wp_date("2018-05-02").as_deref(),
+            Some("2018-05-02T00:00:00Z")
+        );
+        // Junk months/days and non-dates are refused, not guessed.
+        assert_eq!(iso_from_wp_date("2024-13-01 00:00:00"), None);
+        assert_eq!(iso_from_wp_date("2024-02-32 00:00:00"), None);
+        assert_eq!(iso_from_wp_date(""), None);
+        assert_eq!(iso_from_wp_date("not a date"), None);
+    }
+
+    /// Issue #10 bug 1: `released` came from `Utc::now()`, so it changed on
+    /// every request and every episode of a 2018 series claimed "just now".
+    /// It must come from stored data and be identical across calls.
+    #[test]
+    fn episode_released_is_stored_not_the_wall_clock() {
+        use crate::wp_data::WpFile;
+        let files = vec![
+            WpFile {
+                title: "Welcome.To.Waikiki.2018.S01E02.720p.WEBRip.mkv".into(),
+                added_date: 1_792_294_706,
+                ..Default::default()
+            },
+            // No `added_date`: falls back to the series anchor, never to now.
+            WpFile {
+                title: "Welcome.To.Waikiki.2018.S01E01.720p.WEBRip.mkv".into(),
+                ..Default::default()
+            },
+        ];
+        let poster = serde_json::json!("https://example.invalid/p.jpg");
+        let anchor = Some("2018-01-01T00:00:00Z");
+        let a = series_videos("pm:post:1", &files, &poster, anchor);
+        let b = series_videos("pm:post:1", &files, &poster, anchor);
+        assert_eq!(a, b, "the videos list must be stable across calls");
+        // Sorted (S01E01 first), so index 1 is the row that HAS an added_date.
+        assert_eq!(a[0]["released"], serde_json::json!("2018-01-01T00:00:00Z"));
+        assert_eq!(a[1]["released"], serde_json::json!("2026-10-18T03:38:26Z"));
+        // The stored date is used, not the request clock.
+        assert_ne!(
+            a[1]["released"],
+            serde_json::json!(iso_from_unix(crate::storage::now()))
+        );
+
+        // No anchor at all -> `null`, not a fabricated date.
+        let no_anchor = series_videos("pm:post:1", &files, &poster, None);
+        assert_eq!(no_anchor[0]["released"], Value::Null);
+    }
+
+    /// Issue #10 bug 2: the PHP sorts by (season, episode) and the port had
+    /// dropped the sort, so 11 of 12 K-drama series came back scrambled or
+    /// descending. The scan order must not survive into the response.
+    #[test]
+    fn series_videos_are_sorted_by_season_then_episode() {
+        use crate::wp_data::WpFile;
+        let names = [
+            "Perfect.Marriage.Revenge.2023.S01E12.720p.mkv",
+            "Perfect.Marriage.Revenge.2023.S01E11.720p.mkv",
+            "Perfect.Marriage.Revenge.2023.S01E10.720p.mkv",
+            "Perfect.Marriage.Revenge.2023.S01E09.720p.mkv",
+            "Perfect.Marriage.Revenge.2023.S01E01.720p.mkv",
+            "Perfect.Marriage.Revenge.2023.S01E05.720p.mkv",
+            "Perfect.Marriage.Revenge.2023.S02E03.720p.mkv",
+            "Perfect.Marriage.Revenge.2023.S02E01.720p.mkv",
+        ];
+        let files: Vec<WpFile> = names
+            .iter()
+            .map(|t| WpFile {
+                title: (*t).to_string(),
+                added_date: 1_700_000_000,
+                ..Default::default()
+            })
+            .collect();
+        let videos = series_videos("pm:post:2", &files, &Value::Null, None);
+        let seq: Vec<(i64, i64)> = videos
+            .iter()
+            .map(|v| (v["season"].as_i64().unwrap(), v["episode"].as_i64().unwrap()))
+            .collect();
+        assert_eq!(
+            seq,
+            vec![
+                (1, 1),
+                (1, 5),
+                (1, 9),
+                (1, 10),
+                (1, 11),
+                (1, 12),
+                (2, 1),
+                (2, 3)
+            ],
+            "{seq:?}"
+        );
+        // The id/name must still describe the same episode after sorting.
+        for v in &videos {
+            assert_eq!(
+                v["id"],
+                serde_json::json!(format!(
+                    "pm:post:2:{}:{}",
+                    v["season"], v["episode"]
+                ))
+            );
+            assert_eq!(
+                v["name"],
+                serde_json::json!(format!("S{}E{}", v["season"], v["episode"]))
+            );
+        }
+    }
+
+    /// The series anchor is the post's own publish date, else the release year.
+    #[test]
+    fn series_anchor_prefers_the_post_date_over_the_year() {
+        let post = serde_json::json!({"title": "Welcome to Waikiki 2018 • TvSeries", "date": "2024-02-19 20:01:04"});
+        assert_eq!(
+            series_released_anchor(&post).as_deref(),
+            Some("2024-02-19T20:01:04Z")
+        );
+        let no_date = serde_json::json!({"title": "Welcome to Waikiki 2018 • TvSeries"});
+        assert_eq!(
+            series_released_anchor(&no_date).as_deref(),
+            Some("2018-01-01T00:00:00Z")
+        );
+        let nothing = serde_json::json!({"title": "Untitled"});
+        assert_eq!(series_released_anchor(&nothing), None);
     }
 }
