@@ -31,13 +31,21 @@ ENV PM_BUILD_VERSION=${PM_BUILD_VERSION}
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY public ./public
-# BuildKit cache mounts: the crate registry and the target dir survive between
-# builds (including across a multi-arch buildx run), so an emulated arm64 build
-# only recompiles what actually changed instead of the whole dependency tree.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --locked \
+# NO `--mount=type=cache` HERE. BuildKit cache mounts are the only way to keep the
+# cargo registry and target dir between builds, and they are also the one
+# instruction Heroku's CLASSIC Docker builder cannot parse at all — it stops the
+# build dead with:
+#
+#     Step 9/18 : RUN --mount=type=cache,target=/usr/local/cargo/registry ...
+#     the --mount option requires BuildKit.
+#
+# "Deploy to Heroku" (dashboard.heroku.com/new?template=…) and every one-click
+# button use that classic builder, so cache mounts made the template undeployable
+# while the image-promotion path (`.github/workflows/deploy-heroku.yml`) kept
+# working, which is a confusing way to fail. A plain RUN costs a full recompile on
+# each source build and works everywhere. CI does not use this file: the release
+# pipeline builds `Dockerfile.release` (COPY-only, from a prebuilt musl binary).
+RUN cargo build --release --locked \
  && cp target/release/pencarimovie-server /usr/local/bin/pencarimovie-server
 
 FROM alpine:3.20
