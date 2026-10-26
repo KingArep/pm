@@ -26,6 +26,29 @@ All notable changes to the PencariMovie Server / Downloader project will be docu
   re-checked against every existing series rule (`series_keeps_embedded_year`,
   `series_glory_cases_from_php_regression_suite`, …).
 
+- **A series' episode list is no longer short by the episodes that live only in
+  the origin index.** `pm:post:9000018021` ("To My Beloved Thief 2026") owns
+  E03–E14 and E16 — the 13 rows its `post-files` returns — so `/meta` offered 13
+  episodes while `/stream` answered E01, E02 and E15 out of the index
+  (`nunadrama.To.My.Beloved.Thief.E01.1080p.mp4`,
+  `OLD.E01.To.My.Beloved.Thief.2025.mp4`, …). The episode PICKER is
+  `meta.videos`, so three playable episodes were unreachable.
+  `fd_fetch_series_episode_files()` ([`backend.php:10398`](legacy/php/backend.php:10398))
+  computes exactly this gap, but its early return tested only `$hasExplicitEp`,
+  never `$hasGaps`, so the PHP never backfilled either. This is that divergence
+  closed: [`episode_gaps()`](src/routes.rs:5368) finds the numbers between what
+  the post owns, and [`gap_episode_videos()`](src/routes.rs:5409) resolves them
+  against the index through the SAME strict matcher `/stream` uses, so the
+  picker can never advertise an episode the player cannot answer.
+  - One index search, and only when the numbering has a hole; the outcome —
+    including "nothing to fill" — is cached 10 min, so a series like
+    `The Witch 2025` (E1–E10 + E16, with nothing in the index between them) is
+    not re-searched on every `/meta`.
+  - Verified live: `To My Beloved Thief 2026` now lists **16 videos (E1–E16)**;
+    `The Witch 2025` is unchanged at 11 (E1–E10, E16) — no false episodes were
+    invented. Pinned by
+    `routes::tests::episode_gaps_are_the_numbers_between_what_the_post_owns`.
+
 - **A series' episodes no longer report "released just now", and the episode list
   is ordered.** `/meta/series/pm:post:<id>.json` stamped every `released` with
   `Utc::now()` at serialisation, so the value tracked the request clock — three

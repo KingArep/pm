@@ -5353,6 +5353,147 @@ fn series_videos(
     videos
 }
 
+/// The `(season, episode)` pairs a series' file rows do NOT cover, per season.
+///
+/// A post is a slice of the show, not the whole show: `pm:post:9000018021`
+/// ("To My Beloved Thief 2026") owns E03–E14 and E16, while the origin index
+/// also holds E01, E02 and E15. `/stream` answers those because its ladder
+/// searches the index; the episode PICKER is `meta.videos`, built from the post
+/// — so the episodes were unplayable.
+///
+/// `fd_fetch_series_episode_files()` (backend.php:10398) computes exactly this
+/// set, but its early return tested only `$hasExplicitEp`, never `$hasGaps`, so
+/// the PHP never backfilled either. This is the divergence that makes the list
+/// agree with what `/stream` can actually answer.
+fn episode_gaps(files: &[crate::wp_data::WpFile]) -> std::collections::BTreeSet<(i32, i32)> {
+    use std::collections::{BTreeSet};
+
+    let mut present: BTreeSet<(i32, i32)> = BTreeSet::new();
+    for f in files {
+        let (s, e, _) = crate::matcher::classify_season_episode(
+            &f.title,
+            f.season_num,
+            f.episode_num,
+            &f.caption,
+        );
+        if e > 0 {
+            present.insert((s.max(1), e));
+        }
+    }
+    let mut gaps: BTreeSet<(i32, i32)> = BTreeSet::new();
+    let seasons: BTreeSet<i32> = present.iter().map(|(s, _)| *s).collect();
+    for s in seasons {
+        let max_ep = present
+            .iter()
+            .filter(|(ps, _)| *ps == s)
+            .map(|(_, e)| *e)
+            .max()
+            .unwrap_or(0);
+        for e in 1..=max_ep {
+            if !present.contains(&(s, e)) {
+                gaps.insert((s, e));
+            }
+        }
+    }
+    gaps
+}
+
+/// Episode entries for the gaps [`episode_gaps()`] found, resolved against the
+/// origin index with the SAME strict matcher `/stream` uses, so the picker can
+/// never advertise an episode the player cannot answer.
+///
+/// Costs one index search, and only for a series whose numbering has a hole.
+/// The outcome — including "nothing to fill" — is cached for 10 min: a series
+/// like "The Witch 2025" has E11–E15 missing everywhere, and must not pay an
+/// origin search on every `/meta` request.
+async fn gap_episode_videos(
+    media_id: &str,
+    post_id: &str,
+    title: &str,
+    year: &str,
+    files: &[crate::wp_data::WpFile],
+    poster: &Value,
+    anchor: Option<&str>,
+) -> Vec<Value> {
+    let gaps = episode_gaps(files);
+    if gaps.is_empty() || title.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let ckey = format!("{post_id}|{title}|{year}");
+    if let Some(hit) = crate::cache::get("series_gap", &ckey) {
+        if let Some(list) = hit.get("videos").and_then(|v| v.as_array()) {
+            return list.clone();
+        }
+    }
+
+    let keyword = stream_keyword_from_post_title(title);
+    let mut found: std::collections::BTreeMap<(i32, i32), crate::wp_data::WpFile> =
+        std::collections::BTreeMap::new();
+    if !keyword.is_empty() {
+        // Two variants at most: the plain keyword, then its possessive/accent
+        // form. More than that spends the origin's time for a handful of rows.
+        for kw in crate::matcher::stream_keyword_variants(&keyword)
+            .into_iter()
+            .take(2)
+        {
+            for row in crate::wp_data::search_files(&kw, 1000).await {
+                let (s, e, _) = crate::matcher::classify_season_episode(
+                    &row.title,
+                    row.season_num,
+                    row.episode_num,
+                    &row.caption,
+                );
+                let key = (s.max(1), e);
+                if e <= 0 || !gaps.contains(&key) || found.contains_key(&key) {
+                    continue;
+                }
+                if !crate::matcher::series_file_matches_title(
+                    &row.title,
+                    title,
+                    key.0,
+                    key.1,
+                    year,
+                    &row.caption,
+                    &[],
+                ) {
+                    continue;
+                }
+                found.insert(key, row);
+            }
+            if found.len() == gaps.len() {
+                break;
+            }
+        }
+    }
+
+    let extra: Vec<crate::wp_data::WpFile> = found.into_values().collect();
+    let videos = if extra.is_empty() {
+        Vec::new()
+    } else {
+        series_videos(media_id, &extra, poster, anchor)
+    };
+    log(
+        "meta: episode gaps backfilled from the index",
+        &serde_json::json!({
+            "post_id": post_id,
+            "gaps": gaps
+                .iter()
+                .map(|(s, e)| format!("S{}E{}", s, e))
+                .collect::<Vec<_>>(),
+            "filled": videos.len(),
+        }),
+    );
+    crate::cache::put(
+        "series_gap",
+        &ckey,
+        &serde_json::json!({ "videos": videos }),
+        600,
+        0,
+    );
+    videos
+}
+
 /// `other/*` and `pm_topkw_*` rows: the origin's newest / keyword FILE lists,
 /// rendered exactly like the PHP's Telegram-file catalog items
 /// (backend.php:15750-15850).
@@ -5701,6 +5842,35 @@ async fn handle_meta(_ctx: &ReqCtx, path: &str) -> Response {
             let files = crate::wp_data::fetch_post_files_paged(pid, 200, 600, 3).await;
             let anchor = series_released_anchor(&post);
             let mut videos = series_videos(&id, &files, &meta["poster"], anchor.as_deref());
+            // The post is not always the whole show: episodes whose files live
+            // only in the origin index are answerable by `/stream` but were
+            // absent from the picker. See `gap_episode_videos()`.
+            let series_title = meta["name"].as_str().unwrap_or("").to_string();
+            let series_year = meta
+                .get("releaseInfo")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            videos.extend(
+                gap_episode_videos(
+                    &id,
+                    pid,
+                    &series_title,
+                    &series_year,
+                    &files,
+                    &meta["poster"],
+                    anchor.as_deref(),
+                )
+                .await,
+            );
+            // The merge must not disturb the (season, episode) order the rest of
+            // this builder guarantees.
+            videos.sort_by_key(|v| {
+                (
+                    v["season"].as_i64().unwrap_or(0),
+                    v["episode"].as_i64().unwrap_or(0),
+                )
+            });
             // A series with no resolvable episode still needs ONE entry, or
             // Stremio refuses the meta entirely (backend.php:16357-16368).
             if videos.is_empty() {
@@ -8315,6 +8485,55 @@ mod tests {
     /// Issue #10 bug 2: the PHP sorts by (season, episode) and the port had
     /// dropped the sort, so 11 of 12 K-drama series came back scrambled or
     /// descending. The scan order must not survive into the response.
+    /// The origin index holds the whole show; a POST holds only its slice.
+    /// `pm:post:9000018021` ("To My Beloved Thief 2026") owns E03–E14 and E16 —
+    /// the 13 rows the origin's `post-files` returns — so E01, E02 and E15 had
+    /// no entry in the picker while `/stream` answered all three.
+    #[test]
+    fn episode_gaps_are_the_numbers_between_what_the_post_owns() {
+        use crate::wp_data::WpFile;
+
+        let owned: Vec<WpFile> = (3..=14)
+            .chain(std::iter::once(16))
+            .map(|e| WpFile {
+                title: format!("OLD.E{:02}.To.My.Beloved.Thief.2026.mp4", e),
+                ..Default::default()
+            })
+            .collect();
+        let gaps: Vec<(i32, i32)> = episode_gaps(&owned).into_iter().collect();
+        assert_eq!(gaps, vec![(1, 1), (1, 2), (1, 15)]);
+
+        // A post that covers its own numbering spends nothing on a search.
+        let complete: Vec<WpFile> = (1..=16)
+            .map(|e| WpFile {
+                title: format!("Show.S01E{:02}.1080p.mkv", e),
+                ..Default::default()
+            })
+            .collect();
+        assert!(episode_gaps(&complete).is_empty());
+
+        // No resolvable episode at all (a movie-ish or pack-only row set) has no
+        // numbering to complete, so the guard must not fire.
+        assert!(episode_gaps(&[]).is_empty());
+        assert!(episode_gaps(&[WpFile {
+            title: "Show.Complete.Series.mkv".to_string(),
+            ..Default::default()
+        }])
+        .is_empty());
+
+        // Gaps are per SEASON: S1E01..E03 plus S2E02 leaves S2E01 missing and
+        // never reports S1/S2 cross-talk.
+        let two_seasons: Vec<WpFile> = ["Show.S01E01.mkv", "Show.S01E02.mkv", "Show.S01E03.mkv", "Show.S02E02.mkv"]
+            .iter()
+            .map(|t| WpFile {
+                title: (*t).to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let gaps: Vec<(i32, i32)> = episode_gaps(&two_seasons).into_iter().collect();
+        assert_eq!(gaps, vec![(2, 1)]);
+    }
+
     #[test]
     fn series_videos_are_sorted_by_season_then_episode() {
         use crate::wp_data::WpFile;
