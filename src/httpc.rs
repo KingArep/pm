@@ -248,25 +248,58 @@ pub async fn http_json_h_status(
     let (mut ok, mut status, mut text, mut err) =
         call(&target, extra.clone(), secret.clone(), body.clone()).await;
 
-    // A 401 while we HOLD a token means the origin no longer accepts it: the
-    // install is unknown or revoked, the origin's signing key was regenerated, or
-    // the proof fell outside the 60 s clock window. Dropping the token and
-    // enrolling again is the only recovery — without this, a stale token wedges the
-    // install FOREVER. That is exactly what a CPH2581 did: every /resolve-file
-    // answered 401 and playback stayed dead while the UI showed a healthy session.
-    if status == 401 && had_auth {
-        log("wp 401 with a token, re-enrolling", &serde_json::json!({"url": target}));
-        // Re-learn the clock before re-signing: a skewed clock makes every proof
-        // stale, so re-enrolling alone would just mint a token we still can't use.
-        let probe = crate::session::measure_clock_offset().await;
-        if probe.ok {
-            crate::credentials::set_clock_offset(probe.offset);
+    // A 401 means the origin refused this request, and there are TWO cases — both
+    // need the same recovery, and the second one used to get none:
+    //
+    //  1. we HELD a token and it is no longer accepted: the install is unknown or
+    //     revoked, the origin's signing key was regenerated, or the proof fell
+    //     outside the 60 s clock window. Without this, a stale token wedges the
+    //     install forever (measured on a CPH2581: every /resolve-file answered 401
+    //     while the UI showed a healthy session).
+    //  2. we held NO token at all, because enrolment had not happened yet or its
+    //     last attempt failed. `had_auth` was false, so this branch skipped — and
+    //     that is the intermittent "streaming / api/download sometimes not working":
+    //     the request went out unauthenticated, `/resolve-file` answered 401, the
+    //     resolve found no file id, and `/api/download` gave up with
+    //     `400 MISSING_FILE_ID`. Nothing re-enrolled, because nothing thought it
+    //     should.
+    //
+    // One retry only: the retry's own status is not re-examined, so this can never
+    // loop, and `ensure_enrolled_throttled()` still caps attempts at one a minute.
+    // One clock probe per 10 minutes, process-wide.
+    //
+    // `measure_clock_offset()` is an extra round-trip to the origin, and a REVOKED
+    // install 401s on every single request while the player retries its ranges —
+    // probing per 401 meant one wasted request (radio wake, DNS, TLS) for each one,
+    // which is exactly the kind of thing that shows up as battery drain. The clock
+    // cannot drift meaningfully in 10 minutes, so this is free.
+    static LAST_CLOCK_PROBE: std::sync::atomic::AtomicI64 =
+        std::sync::atomic::AtomicI64::new(0);
+    if status == 401 {
+        if had_auth {
+            log("wp 401 with a token, re-enrolling", &serde_json::json!({"url": target}));
+            // Re-learn the clock before re-signing: a skewed clock makes every
+            // proof stale, so re-enrolling alone would mint a token we still
+            // cannot use.
+            let now_s = crate::storage::now();
+            if now_s - LAST_CLOCK_PROBE.load(std::sync::atomic::Ordering::SeqCst) > 600 {
+                LAST_CLOCK_PROBE.store(now_s, std::sync::atomic::Ordering::SeqCst);
+                let probe = crate::session::measure_clock_offset().await;
+                if probe.ok {
+                    crate::credentials::set_clock_offset(probe.offset);
+                    log(
+                        "pm-auth clock corrected",
+                        &serde_json::json!({"offset_secs": probe.offset}),
+                    );
+                }
+            }
+            crate::credentials::clear_auth_token();
+        } else {
             log(
-                "pm-auth clock corrected",
-                &serde_json::json!({"offset_secs": probe.offset}),
+                "wp 401 without a token, enrolling",
+                &serde_json::json!({"url": target}),
             );
         }
-        crate::credentials::clear_auth_token();
         if crate::credentials::ensure_enrolled_throttled().await {
             extra = headers
                 .iter()
