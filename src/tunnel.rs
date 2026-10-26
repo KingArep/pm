@@ -2659,11 +2659,24 @@ mod tests {
 
     #[test]
     fn metrics_port_is_always_usable() {
-        let port = pick_metrics_port();
-        assert!(port > 0);
-        // the listener really was released, so the port can be re-bound
-        let rebound = std::net::TcpListener::bind(("127.0.0.1", port));
-        assert!(rebound.is_ok() || port == 20241);
+        // `pick_metrics_port()` binds port 0 and drops the listener, so the number
+        // it returns is free *at that instant* — but another test in this parallel
+        // run (or the CI runner itself) can take it before we re-bind. That TOCTOU
+        // is not a product bug: CI failed here once with "rebound.is_ok()" false on
+        // a busy runner while 229 other tests passed. Retry instead of failing, so
+        // the guarantee being checked (a returned port really is bindable) still
+        // holds without turning a scheduler race into a red build.
+        let mut last = 0u16;
+        for _ in 0..10 {
+            let port = pick_metrics_port();
+            assert!(port > 0);
+            last = port;
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() || port == 20241 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("no re-bindable metrics port in 10 attempts (last was {last})");
     }
 
     #[test]
