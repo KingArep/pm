@@ -6,6 +6,25 @@ All notable changes to the PencariMovie Server / Downloader project will be docu
 
 ### Fixed
 
+- **An AAC `.m4a` is no longer pulled in full before the server admits it cannot
+  transcode it.** The device log (CPH2581, 1.0.86) said
+  `alac probe rejected the file … no decoder for codec CodecType(4100)` — and
+  `4100` is `0x1004`, i.e. **AAC** (`symphonia_core::codecs::CODEC_TYPE_AAC`;
+  ALAC is `0x2003`). Symphonia 0.5 has no AAC decoder at all, so an AAC `.m4a`
+  could never take the ALAC→WAV path, yet
+  [`serve_alac()`](src/download.rs:1) pulled the WHOLE track (measured 8 MB, up to
+  25 MB) from Telegram before the probe said so — on the first play of every such
+  file, which is what made `.m4a` tracks feel broken on Eclipse Android.
+  - [`audio::mp4_audio_fourcc()`](src/audio.rs:38) reads the first `stsd` sample
+    entry (`alac`, `mp4a` = AAC, `ac-3`, `opus`, …) from a prefix of the file.
+  - `serve_alac` checks it after the first 1 MB chunk and returns immediately for
+    a codec this build cannot decode, so the raw bytes the client can play start
+    flowing at once; the verdict is cached (`alac_skip`, 1 h) as before.
+  - An undecidable prefix (`moov` at the end of the file) keeps the old
+    behaviour, so a real ALAC track is never skipped. Pinned by
+    `audio::tests::mp4_codec_is_read_from_the_first_sample_entry` and
+    `…::mp4_codec_is_unknown_without_a_sample_entry`.
+
 - **A busy origin no longer reads as "this track/file is gone".** `/resolve-file`
   answers `503 Server busy resolving file` (with `retry_after: 5`) while a
   Telegram relay runs for that bot+code, and `http_json()` collapses every 5xx
