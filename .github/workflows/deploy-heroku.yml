@@ -152,6 +152,27 @@ jobs:
           exit 1
 
       # ── promote it (no rebuild, no source in the image) ─────────────────────
+      #
+      # ── WHY THIS IS NOT `docker pull` + `docker push` ───────────────────────
+      # `:sha-<short>` is a MULTI-ARCH MANIFEST LIST: `release.yml` assembles
+      # `native-amd64` + `native-arm64` with `imagetools create`. Two things
+      # break the obvious promotion:
+      #
+      #   1. A tag that resolves to an index is ALSO STORED AS AN INDEX, so
+      #      `docker push` re-uploads the whole list — including the arm64
+      #      manifest whose layers were never downloaded here.
+      #   2. Heroku's registry stores exactly one kind of artifact: a
+      #      SINGLE-platform linux/amd64 image in Docker v2 schema 2 media
+      #      types. An OCI index is rejected outright.
+      #
+      # Observed, and why this comment exists:
+      #
+      #   4f4fb700ef54: Unavailable          <- arm64 blobs, never pulled
+      #   error from registry: unsupported   <- the index itself
+      #
+      # Both architectures still stay published on GHCR (render.yaml pulls
+      # `:native`, which must remain a list). Only the PROMOTION is narrowed to
+      # the architecture a dyno actually runs.
       - name: Deploy the pinned image
         id: image
         continue-on-error: true
@@ -160,9 +181,50 @@ jobs:
           REF: ${{ steps.img.outputs.ref }}
         run: |
           set -euo pipefail
-          docker pull "$REF"
-          docker tag "$REF" "registry.heroku.com/${HEROKU_APP}/web"
-          docker push "registry.heroku.com/${HEROKU_APP}/web"
+          DST="registry.heroku.com/${HEROKU_APP}/web"
+
+          # Resolve the linux/amd64 sub-manifest digest. Registry-side only, no
+          # image is pulled. A tag that is already a plain manifest (no
+          # `.Manifest.Manifests`) prints nothing here and is used as-is.
+          AMD64="$(
+            docker buildx imagetools inspect --format \
+              '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{.Digest}}{{"\n"}}{{end}}' \
+              "$REF" 2>/dev/null |
+              awk '$1 == "linux/amd64" { print $2; exit }' || true
+          )"
+          if [ -n "$AMD64" ]; then SRC="${REF}@${AMD64}"; else SRC="$REF"; fi
+          echo "Promoting ${SRC}"
+          echo "       -> ${DST}"
+
+          # skopeo copies ONE platform and rewrites the manifest to Docker v2
+          # schema 2 (`--format v2s2`), which is what Heroku accepts. `--all=false`
+          # is explicit so a future default cannot silently turn this back into
+          # the index push that failed with "unsupported".
+          if ! command -v skopeo >/dev/null 2>&1; then
+            sudo apt-get update -qq >/dev/null 2>&1 || true
+            sudo apt-get install -y -qq skopeo >/dev/null 2>&1 || true
+          fi
+          if command -v skopeo >/dev/null 2>&1; then
+            AUTH=()
+            if [ -f "$HOME/.docker/config.json" ]; then
+              AUTH=(--authfile "$HOME/.docker/config.json")
+            fi
+            skopeo copy --all=false --override-os linux --override-arch amd64 \
+              --format v2s2 "${AUTH[@]}" "docker://${SRC}" "docker://${DST}"
+          else
+            echo "::warning::skopeo unavailable - falling back to a single-manifest docker pull/push"
+            docker pull "$SRC"
+            docker tag "$SRC" "$DST"
+            docker push "$DST"
+          fi
+
+          # A stored index would deploy green and then crash the dyno at exec,
+          # so refuse to release one.
+          if docker buildx imagetools inspect --raw "$DST" 2>/dev/null |
+               grep -qE 'image\.index|manifest\.list'; then
+            echo "::error::${DST} holds a manifest index/OCI index - Heroku dynos cannot run it."
+            exit 1
+          fi
 
           # The real release. A bare `PATCH /formation` answered 200 without
           # rolling the dyno (the app kept serving the old build), so this uses

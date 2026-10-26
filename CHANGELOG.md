@@ -6,6 +6,21 @@ All notable changes to the PencariMovie Server / Downloader project will be docu
 
 ### Fixed
 
+- **The Heroku deploy can push the image again** (`error from registry:
+unsupported`). [`deploy-heroku.yml`](.github/workflows/deploy-heroku.yml:1)
+  promoted `:sha-<7>` with `docker pull` → `docker push`, but that tag is a
+  **multi-arch manifest list** (assembled by
+  [`release.yml`](.github/workflows/release.yml:575) from `native-amd64` +
+  `native-arm64`). A tag that resolves to an index is also _stored_ as an index,
+  so the push re-uploaded the whole list — including the arm64 manifest whose
+  layers were never downloaded (`4f4fb700ef54: Unavailable`) — and
+  `registry.heroku.com` only stores a single-platform `linux/amd64` image in
+  Docker v2 schema 2, so it answered `unsupported`. The promotion now resolves
+  the `linux/amd64` sub-manifest by digest and copies exactly that image with
+  `skopeo copy --all=false --override-arch amd64 --format v2s2`, then refuses to
+  release if the registry somehow holds an index. Both architectures still stay
+  published on GHCR (`render.yaml` pins `:native`, which must remain a list).
+
 - **The sponsored item is now `streams[0]` on EVERY `/stream/*` answer.** Only
   [`finish_streams()`](src/routes.rs:1) used to prepend it, so every answer that
   built its own array lost it:
