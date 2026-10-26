@@ -24,7 +24,6 @@
 //! "1 client x 4 tasks" and "4 clients x 1 task".
 
 mod assets;
-mod audio;
 mod auth;
 mod cache;
 mod config;
@@ -169,70 +168,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // `--audio-probe <file>`: print what the ALAC decoder sees for a local
-    // `.m4a`, and optionally decode a window of PCM from it. This is how a
-    // "rejected, falling back to the raw download" log line is diagnosed.
-    if let Some(i) = arg_pos("--audio-probe") {
-        let args: Vec<String> = std::env::args().collect();
-        let Some(path) = args.get(i + 1) else {
-            eprintln!("usage: pencarimovie-server --audio-probe <file.m4a> [start_pcm_byte] [bytes]");
-            std::process::exit(2);
-        };
-        let bytes = std::fs::read(path)?;
-        match audio::probe_why(&bytes) {
-            Ok(info) => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": 1,
-                        "file": path,
-                        "bytes": bytes.len(),
-                        "sample_rate": info.sample_rate,
-                        "channels": info.channels,
-                        "n_frames": info.n_frames,
-                        "pcm_bytes": info.pcm_bytes(),
-                        "wav_total_bytes": info.total_bytes(),
-                    }))?
-                );
-                let start = args.get(i + 2).and_then(|s| s.parse::<u64>().ok());
-                if let Some(start) = start {
-                    let want = args
-                        .get(i + 3)
-                        .and_then(|s| s.parse::<usize>().ok())
-                        .unwrap_or(4096);
-                    let pcm = audio::decode_range(&bytes, start, want);
-                    let nonzero = pcm.iter().filter(|b| **b != 0).count();
-                    println!(
-                        "decoded from pcm offset {}: {} of {} bytes, {} non-zero",
-                        start,
-                        pcm.len(),
-                        want,
-                        nonzero
-                    );
-                    if want >= 8 && pcm.len() >= 8 {
-                        println!(
-                            "first samples: {:?}",
-                            (0..4)
-                                .map(|k| i16::from_le_bytes([pcm[k * 2], pcm[k * 2 + 1]]))
-                                .collect::<Vec<_>>()
-                        );
-                    }
-                }
-                return Ok(());
-            }
-            Err(e) => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": 0,
-                        "file": path,
-                        "error": e,
-                    }))?
-                );
-                std::process::exit(1);
-            }
-        }
-    }
+    // `--audio-probe` was REMOVED with the ALAC decoder (`src/audio.rs` and the
+    // `symphonia` dependency). It existed only to diagnose that decoder's log
+    // lines; nothing decodes audio in this binary any more, so the flag would
+    // have had nothing to print.
 
     let port: u16 = arg_value("--port")
         .or_else(|| storage::env("PM_LISTEN_PORT"))

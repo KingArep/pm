@@ -59,10 +59,11 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 # PM-Auth (Option A): the install's identity is an Ed25519 key it never sends;
 # every request carries a signature instead of the fleet-wide api_secret.
 ed25519-dalek = "2"
-# ALAC playback: decode-only. Eclipse/Android cannot decode ALAC in `.m4a`, and
-# the PHP port transcoded it to FLAC with ffmpeg; here the PCM is decoded inside
-# the download request and wrapped in a WAV header, so no encoder is needed.
-symphonia = { version = "0.5", features = ["alac", "isomp4", "pcm", "wav"] }
+# `symphonia` (the ALAC decoder) was REMOVED. Nothing in this binary decodes
+# audio any more: ALAC cannot be decoded on Android, the in-engine transcode cost
+# 43 s to the first byte on a 49 MB track, and the same recordings are indexed as
+# FLAC, which streams raw and plays natively. Dropping it also drops its whole
+# codec/container tree from the binary (see README for the measured size).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "fs"] }
 tokio-stream = "0.1"
 url = "2"
@@ -78,3 +79,11 @@ redb = "2"
 
 [profile.release]
 opt-level = 3
+# The APK ships this ELF inside every install, so size is a user-facing number.
+# `lto` + one codegen unit let the linker drop the code that only exists because
+# a generic was instantiated somewhere; `strip` removes the symbol table (gradle
+# also strips the jniLibs copy, but the desktop/server artifacts ride the same
+# profile and this is where they get stripped too).
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
