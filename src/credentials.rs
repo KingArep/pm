@@ -477,6 +477,41 @@ mod provision_tests {
     }
 
     #[test]
+    /// The shipping header wrapper, with a token definitely present.
+    ///
+    /// `pm_auth_headers_follow_the_token` can pass by taking the early-return
+    /// path (no token on this machine), which would hide a regression. This
+    /// writes a dummy token, checks the exact header names, and restores the
+    /// previous state — the engine re-mints on its next lease, so it is safe.
+    #[test]
+    fn pm_auth_headers_are_built_when_a_token_exists() {
+        let path = auth_token_path();
+        let previous = std::fs::read(&path).ok();
+
+        save_auth_token("v1.dummy.claims", crate::storage::now() + 3600);
+        let headers = crate::httpc::pm_auth_headers(
+            "GET",
+            "https://pencarimovie.com/wp-json/pencarimovie-server/v1/resolve-file?bot_id=1",
+        );
+
+        match previous {
+            Some(bytes) => {
+                let _ = std::fs::write(&path, bytes);
+            }
+            None => clear_auth_token(),
+        }
+
+        let names: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["X-PM-Auth", "X-PM-Sign-Pub", "X-PM-Ts", "X-PM-Nonce", "X-PM-Proof"],
+            "the engine must send all five PM-Auth headers"
+        );
+        // 64-byte Ed25519 signature -> 86 base64url chars.
+        assert_eq!(headers[4].1.len(), 86);
+        assert_eq!(headers[0].1, "v1.dummy.claims");
+    }
+
     /// The shipping header wrapper: exactly five headers when a token is held,
     /// and nothing at all when it is not (so the legacy path stays in charge).
     /// Reads storage only — never writes.
