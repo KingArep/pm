@@ -367,6 +367,26 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Enrol for PM-Auth BEFORE anything talks to the origin.
+    //
+    // `/provision-session` used to be the only enrolment path, so an install that
+    // already held a bot session never got a token and authenticated with the
+    // fleet-wide `X-API-Secret` instead. Retiring that secret would therefore have
+    // broken playback on every existing install — including this build — not just
+    // on old ones. Detached: a slow origin must not delay the listener.
+    {
+        tokio::spawn(async move {
+            let ok = credentials::ensure_enrolled().await;
+            log::stderr_log(
+                "pm-auth enrolment",
+                Some(&serde_json::json!({
+                    "enrolled": ok,
+                    "bot_id": session::get_bot_id(),
+                })),
+            );
+        });
+    }
+
     // Make sure this instance holds ONE guest bot. Detached for the same reason as
     // the warm above: a lease is an HTTP round-trip plus a Telegram login and must
     // not delay the listener. One per instance is a hard rule (a pooled fleet may

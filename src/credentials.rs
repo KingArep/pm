@@ -282,6 +282,55 @@ pub fn clear_auth_token() {
 ///
 /// Returns `(proof_b64u, public_key_b64u)`. The origin rebuilds the same string
 /// and checks the key's thumbprint against the one burned into the token.
+/// Make sure this install holds a usable PM-Auth token, enrolling if it does not.
+///
+/// This is the call that was missing: `/provision-session` is the ONLY place
+/// the origin enrolled an install, so an install that already had a bot session
+/// never leased again and therefore never held a token. It kept working purely
+/// on the fleet-wide `X-API-Secret` — which is exactly what we are retiring, so
+/// EVERY existing install (old build and new build alike) would have stopped
+/// playing the moment the secret was refused. Measured on the dev box: no
+/// `device_signkey.json`, no `auth_token.json`, no ticket, while playback ran.
+///
+/// The credential is the Ed25519 key this install generates and keeps; only the
+/// public half travels. Returns true when a token is available afterwards.
+pub async fn ensure_enrolled() -> bool {
+    let bot = crate::session::get_bot_id();
+    if bot.is_empty() {
+        // Nothing to scope a token to yet: the lease path will enrol.
+        return false;
+    }
+    if !auth_token().is_empty() {
+        return true;
+    }
+    let (pk, _sk) = sign_keypair();
+    let url = format!("{}/auth-enroll", crate::config::wp_api_base());
+    let params = vec![
+        ("install_pub".to_string(), b64u(pk)),
+        ("device_id".to_string(), crate::diagnostics::get_device_id()),
+        ("bot_id".to_string(), bot),
+    ];
+    let resp = crate::httpc::http_json(&url, &params, "POST", 20).await;
+    let ok = resp
+        .get("ok")
+        .map(|v| v.as_bool().unwrap_or(false) || v.as_i64().unwrap_or(0) != 0)
+        .unwrap_or(false);
+    let token = resp.get("auth_token").and_then(|v| v.as_str()).unwrap_or("");
+    let expires_at = resp.get("auth_expires_at").and_then(|v| v.as_i64()).unwrap_or(0);
+    if !ok || token.is_empty() {
+        crate::log::stderr_log(
+            "pm-auth enrol failed",
+            Some(&serde_json::json!({
+                "status_ok": ok,
+                "message": resp.get("message").cloned().unwrap_or(serde_json::Value::Null),
+            })),
+        );
+        return false;
+    }
+    save_auth_token(token, expires_at);
+    true
+}
+
 pub fn sign_proof(method: &str, endpoint: &str, ts: i64, nonce: &str) -> Option<(String, String)> {
     use ed25519_dalek::Signer as _;
     let (pk, sk) = sign_keypair();
@@ -476,7 +525,17 @@ mod provision_tests {
         assert_eq!(endpoint_of(""), "unknown");
     }
 
-    #[test]
+    /// The token file is process-wide state, so the tests that write it MUST NOT
+    /// run concurrently. Measured without this: `…_are_built_when_a_token_exists`
+    /// deletes the file (there was no previous token) while
+    /// `…_follow_the_token` is between building the headers and re-reading
+    /// `auth_token()`, so it saw "token present" next to an empty header list and
+    /// failed with `left: []`.
+    fn token_file_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        &LOCK
+    }
+
     /// The shipping header wrapper, with a token definitely present.
     ///
     /// `pm_auth_headers_follow_the_token` can pass by taking the early-return
@@ -485,6 +544,7 @@ mod provision_tests {
     /// previous state — the engine re-mints on its next lease, so it is safe.
     #[test]
     fn pm_auth_headers_are_built_when_a_token_exists() {
+        let _guard = token_file_lock().lock().unwrap_or_else(|e| e.into_inner());
         let path = auth_token_path();
         let previous = std::fs::read(&path).ok();
 
@@ -517,6 +577,7 @@ mod provision_tests {
     /// Reads storage only — never writes.
     #[test]
     fn pm_auth_headers_follow_the_token() {
+        let _guard = token_file_lock().lock().unwrap_or_else(|e| e.into_inner());
         let headers = crate::httpc::pm_auth_headers(
             "GET",
             "https://pencarimovie.com/wp-json/pencarimovie-server/v1/resolve-file?bot_id=1",
