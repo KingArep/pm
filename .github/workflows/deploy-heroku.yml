@@ -1,6 +1,6 @@
 name: Deploy to Heroku
 
-# Auto-deploy to Heroku on every push to main.
+# MANUAL ONLY: Actions -> "Deploy to Heroku" -> Run workflow.
 #
 # Why this workflow instead of Heroku's own GitHub integration: this app is on
 # the **container** stack (`heroku.yml` -> `Dockerfile`), and the dashboard
@@ -8,17 +8,21 @@ name: Deploy to Heroku
 # image to `registry.heroku.com/<app>/web` is the supported path for container
 # stacks.
 #
-# ── WHAT WAS BROKEN ──────────────────────────────────────────────────────────
-# It promoted `ghcr.io/<repo>:native`. That is a MOVING tag and nothing
-# rebuilds it on a push — `release.yml` is workflow_dispatch-only — so the job
-# was green while Heroku kept running an older binary (observed: the live app
-# answered `build: "0.1.0"`, i.e. an image built without `.git`, so `build.rs`
-# fell back to `CARGO_PKG_VERSION` and every client showed "Update available").
+# ── WHAT THIS JOB DOES, AND WHAT IT REFUSES TO DO ───────────────────────────
+# It moves ONE image that already exists in GHCR into Heroku's registry:
 #
-# Now the deploy is PINNED to an immutable per-commit tag, `:sha-<7>`, which
-# `release.yml`'s docker-manifest job publishes on every run. If that tag does
-# not exist yet, this job dispatches `release.yml` (Docker-only) and waits for
-# the image instead of deploying something else. Nothing is built here.
+#   - the `image` input when given (any published tag: `sha-8ad2f40`, `v1.1.0`),
+#   - otherwise `:sha-<7>` for the commit the run was started on, which is what
+#     every `release.yml` run publishes.
+#
+# It does NOT build, it does NOT dispatch `release.yml`, and it does NOT fall
+# back to `:native` or "whatever is newest". That last one is the bug this file
+# was written around: `:native` is a MOVING tag that nothing rebuilt on a push,
+# so the job went green while Heroku kept serving an older binary (the live app
+# answered `build: "0.1.0"`, i.e. built without `.git`, and every client showed
+# "Update available"). When the tag is missing the job FAILS and prints the tag
+# it looked for — publish with "Release Builder & Docker Publish" first, then
+# run this workflow again.
 #
 # Required repository secret: HEROKU_API_KEY
 #   Get it with `heroku authorizations:create -d "github-actions pm-server"`
@@ -26,57 +30,39 @@ name: Deploy to Heroku
 #   Add it with `gh secret set HEROKU_API_KEY` (or Settings -> Secrets -> Actions).
 
 on:
-  push:
-    branches: [main]
-    # A commit that only touches CI, docs or scratch tools CANNOT change the
-    # binary, so it must not force a release build: this workflow pins
-    # `:sha-<short>`, that tag would not exist, and the "Find (or trigger)"
-    # step below would dispatch a full `release.yml` for an image identical to
-    # the previous commit's. Everything that can change the binary is
-    # deliberately absent from this list: `src/`, `public/`, `build.rs`,
-    # `Cargo.*`, `Dockerfile*`, `desktop/`.
-    paths-ignore:
-      - ".github/**"
-      - "**.md"
-      - "docs/**"
-      - "plans/**"
-      - "scripts/**"
-      - "tools/**"
-      - "tests/**"
-  # Lets you re-deploy without an empty commit (Actions tab -> Run workflow).
+  # Manual only, on purpose: a deploy is a decision, not a side effect of a
+  # push. Nothing here rebuilds anything, so there is no per-commit run worth
+  # automating — `release.yml` publishes the image, this workflow ships it.
   workflow_dispatch:
     inputs:
       image:
-        # Reuse a build that already exists instead of building this commit.
-        # Needed after a CI/docs-only commit (there is no image for it) and when
-        # a promotion has to be retried without touching source.
-        description: "Promote an ALREADY-published tag (e.g. sha-8ad2f40) instead of building this commit"
+        # Promote a specific build instead of this commit's. Needed when the
+        # commit is CI/docs-only (no image of its own) or when re-shipping the
+        # same binary after a failed promotion.
+        description: "Tag to promote (e.g. sha-8ad2f40 or v1.1.0). Empty = :sha-<7> of this commit."
         required: false
         default: ""
 
-# Never run two deploys at once; a later push cancels an in-flight older one.
+# One deploy at a time. A second manual run WAITS for the first instead of
+# killing it half-way through a registry push.
 concurrency:
   group: heroku-deploy
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
   # Pull this repository's own published image.
   packages: read
-  # Dispatch `release.yml` when the pinned image does not exist yet.
-  actions: write
 
 env:
   HEROKU_APP: pm-server
   IMAGE: ghcr.io/${{ github.repository }}
-  # How long to wait for `release.yml` to publish `:sha-<short>`.
-  IMAGE_WAIT_SECONDS: "1500"
 
 jobs:
   deploy:
-    name: Release this commit's image to Heroku
+    name: Promote a published image to Heroku
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -118,85 +104,39 @@ jobs:
           echo "$HEROKU_API_KEY" | docker login --username=_ --password-stdin registry.heroku.com
           heroku container:login 2>&1 | tail -n 2 || true
 
-      # ── resolve the exact image for THIS commit ─────────────────────────────
-      - name: Find (or trigger) this commit's image
+      # ── resolve the image to promote ────────────────────────────────────────
+      # Registry lookup only. Nothing is built, nothing is dispatched and
+      # nothing is waited for.
+      - name: Resolve the image to promote
         id: img
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA7: ${{ github.sha }}
         run: |
           set -euo pipefail
 
-          # A human pin wins, and it is the ONLY way an older image is reused.
-          # A CI/docs-only commit has no image of its own (see `paths-ignore`)
-          # and its binary is identical to the previous commit's, so rebuilding
-          # it is pure waste. The automatic path below NEVER falls back to an
-          # older image on its own — deploying something other than this commit
-          # silently is the exact "green deploy, stale app" bug this workflow
-          # exists to remove (a live app reporting `build: 0.1.0` while CI was
-          # green). Reuse therefore has to be an explicit, logged decision.
-          OVERRIDE="$(printf '%s' "${{ github.event.inputs.image }}" | tr -d '[:space:]')"
-          if [ -n "$OVERRIDE" ]; then
-            # Accept either a bare tag (`sha-8ad2f40`) or a full ref pasted
-            # from a `docker pull` line (`ghcr.io/<repo>:sha-8ad2f40`).
-            OVERRIDE="${OVERRIDE#ghcr.io/}"
-            OVERRIDE="${OVERRIDE#"${GITHUB_REPOSITORY}:"}"
-            OVERRIDE="${OVERRIDE#${IMAGE}:}"
-            if ! docker manifest inspect "${IMAGE}:${OVERRIDE}" >/dev/null 2>&1; then
-              echo "::error::${IMAGE}:${OVERRIDE} is not published in GHCR - cannot promote it"
-              exit 1
-            fi
-            echo "ref=${IMAGE}:${OVERRIDE}" >> "$GITHUB_OUTPUT"
-            echo "::notice::Promoting the already-published image ${IMAGE}:${OVERRIDE} (no build)"
+          WANT="$(printf '%s' "${{ github.event.inputs.image }}" | tr -d '[:space:]')"
+          if [ -z "$WANT" ]; then
+            # Every `release.yml` run publishes this tag for the commit it built.
+            WANT="sha-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
+          fi
+          # Accept a bare tag (`sha-8ad2f40`) or a full ref pasted from a
+          # `docker pull` line (`ghcr.io/<repo>:sha-8ad2f40`).
+          WANT="${WANT#ghcr.io/}"
+          WANT="${WANT#"${GITHUB_REPOSITORY}:"}"
+          WANT="${WANT#${IMAGE}:}"
+          WANT="${WANT#:}"
+
+          if docker manifest inspect "${IMAGE}:${WANT}" >/dev/null 2>&1; then
+            echo "ref=${IMAGE}:${WANT}" >> "$GITHUB_OUTPUT"
+            echo "::notice::Promoting the published image ${IMAGE}:${WANT}"
             exit 0
           fi
 
-          SHA7="$(printf '%s' "$SHA7" | cut -c1-7)"
-          REF="${IMAGE}:sha-${SHA7}"
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "Pinned image: ${REF}"
-
-          # Already published by an earlier `release.yml` run for this commit?
-          if docker manifest inspect "$REF" >/dev/null 2>&1; then
-            echo "::notice::Using the already-published image ${REF}"
-            exit 0
-          fi
-
-          # Not yet: ask `release.yml` for a Docker-only build of this commit and
-          # WAIT for the tag. Waiting on the registry (not on a run id) keeps the
-          # logic simple and is immune to the dispatch/list race.
-          #
-          # But never dispatch when a release run for THIS commit is already
-          # queued or running. That check is the difference between one release
-          # run and three: a push makes this job run while a human
-          # `workflow_dispatch` for the same SHA is still building, the registry
-          # lookup above legitimately misses (the image is not pushed yet), and
-          # the dispatch then duplicated the whole build as `github-actions[bot]`.
-          # The wait below is identical either way, so an in-flight run is simply
-          # awaited.
-          INFLIGHT="$(gh run list --workflow release.yml --commit "$GITHUB_SHA" \
-            --json status \
-            --jq '[.[] | select(.status == "queued" or .status == "in_progress")] | length')"
-          if [ "${INFLIGHT:-0}" -gt 0 ]; then
-            echo "::notice::release.yml already queued/running for $GITHUB_SHA (${INFLIGHT}) - waiting for ${REF} instead of dispatching a duplicate"
-          else
-            echo "::notice::${REF} is not published yet - dispatching release.yml (Docker-only)"
-            gh workflow run release.yml --ref main -f tag="" || {
-              echo "::error::Could not dispatch release.yml"
-              exit 1
-            }
-          fi
-
-          deadline=$(( $(date +%s) + IMAGE_WAIT_SECONDS ))
-          while [ "$(date +%s)" -lt "$deadline" ]; do
-            if docker manifest inspect "$REF" >/dev/null 2>&1; then
-              echo "::notice::${REF} published"
-              exit 0
-            fi
-            sleep 20
-          done
-          echo "::error::Timed out after ${IMAGE_WAIT_SECONDS}s waiting for ${REF}."
-          echo "Check the latest 'Release Builder & Docker Publish' run."
+          # Fail loudly and say exactly what is missing. Deploying something
+          # else "so the deploy is not red" is what produced a live app
+          # reporting build 0.1.0 for several releases.
+          echo "::error::${IMAGE}:${WANT} is not published in GHCR."
+          echo "Publish it first: Actions -> 'Release Builder & Docker Publish' -> Run workflow"
+          echo "  (each run publishes :sha-<7> for the commit it builds, plus :native and, when tagged, :latest)"
+          echo "Then run this workflow again, or pass an existing tag as the 'image' input."
           exit 1
 
       # ── promote it (no rebuild, no source in the image) ─────────────────────
@@ -281,10 +221,10 @@ jobs:
           echo "--- recent releases"
           heroku releases -a "$HEROKU_APP" --num 3 || true
 
-      # Fallback: no image for this commit (release.yml failed, or the registry
-      # push was rejected) -> let Heroku build from the commit, which is the slow
-      # path this job exists to avoid but must keep working so a push is never a
-      # red deploy.
+      # Fallback: the image exists but the registry push was rejected -> let
+      # Heroku build from this commit. Slow, and `build.rs` has no tags there
+      # (so the version reads as CARGO_PKG_VERSION), but it keeps a manual
+      # deploy from ending with nothing live.
       - name: Deploy by building on Heroku (fallback)
         if: steps.image.outcome != 'success'
         env:

@@ -20,6 +20,11 @@ unsupported`). [`deploy-heroku.yml`](.github/workflows/deploy-heroku.yml:1)
   `skopeo copy --all=false --override-arch amd64 --format v2s2`, then refuses to
   release if the registry somehow holds an index. Both architectures still stay
   published on GHCR (`render.yaml` pins `:native`, which must remain a list).
+  The workflow is also **manual only** now (`workflow_dispatch`) and never
+  dispatches `release.yml`: it promotes the `image` input when given, else the
+  `:sha-<7>` of the commit the run was started on, and fails naming that tag
+  when it is not published — instead of rebuilding, or silently falling back to
+  `:native`.
 
 - **The sponsored item is now `streams[0]` on EVERY `/stream/*` answer.** Only
   [`finish_streams()`](src/routes.rs:1) used to prepend it, so every answer that
