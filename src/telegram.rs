@@ -363,18 +363,22 @@ impl TelegramPool {
             // next request. This is the one choke point every login goes through
             // (download candidate loop, BOT_TOKENS provisioning, /api/botlogin), so
             // the guard belongs here rather than in each caller.
-            let flood = crate::session::flood_remaining();
+            // The wait is PER TOKEN (measured: 4 of 6 bots waiting, 2 signing in
+            // fine), so the guard and the record both key on THIS bot. A global
+            // flag here refused logins that would have worked.
+            let flood = crate::session::flood_remaining_for(&key);
             if flood > 0 {
                 return Err(format!(
-                    "bot sign-in paused: Telegram rate limit for another {}s (FLOOD_WAIT).",
+                    "bot sign-in paused: Telegram rate limit for this bot for another {}s (FLOOD_WAIT).",
                     flood
                 ));
             }
             // auth.importBotAuthorization, exactly what grammers sends.
-            client
-                .bot_sign_in(tok, &api_hash)
-                .await
-                .map_err(|e| format!("bot sign-in failed: {}", e))?;
+            client.bot_sign_in(tok, &api_hash).await.map_err(|e| {
+                let msg = format!("bot sign-in failed: {}", e);
+                crate::session::note_flood_for(&key, &msg);
+                msg
+            })?;
         }
 
         let users = client

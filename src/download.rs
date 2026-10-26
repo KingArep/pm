@@ -846,7 +846,9 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
                 // a `403` that reads like "connect your bot". Logging in again before
                 // that duration ends is what extends it, so nothing here retries the
                 // login — it only reports the deadline the login has to wait for.
-                let flood = crate::session::flood_remaining();
+                let flood =
+                    crate::session::flood_seconds_in(prov.error.as_deref().unwrap_or(""))
+                        .max(crate::session::flood_remaining_for(&bot_id));
                 let message = if connecting {
                     "Connecting guest bot in progress. Please refresh or try again in a few seconds.".to_string()
                 } else if flood > 0 {
@@ -903,17 +905,16 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
     // on — measured on Heroku: 5 dynos, 5 independent pools, the added bot used
     // by one dyno in five.
     //
-    // The second half is gated on there being NO recorded login flood. While a
-    // `FLOOD_WAIT` is armed a session-less bot cannot be logged in at all —
-    // `boot()` answers `420 FLOOD_WAIT caused by auth.importBotAuthorization` —
-    // so counting it as usable bought a doomed attempt that RE-ARMED the wait.
-    // That is how one bad login became `retry_after: 2421` for every viewer on
-    // the instance: each request tried the login again, and each try extended it.
-    // A bot that already holds a session file never logs in, so the gate does not
-    // apply to it — one logged-in bot keeps serving through the whole wait.
-    let flood_wait = crate::session::flood_remaining();
+    // The second half is gated on THIS bot having no recorded login wait. Telegram
+    // applies the wait per token — measured on the six `BOT_TOKENS` bots: four were
+    // waiting (1365/1369/1379/1381 s) while two signed in in under 400 ms — so a
+    // session-less bot whose token is NOT waiting is perfectly usable and must stay
+    // a candidate. Judging every bot by one bot's wait is what took the healthy
+    // ones offline with the sick ones.
     let usable = |id: &str| {
-        has_local_session(id) || (flood_wait == 0 && crate::session::env_token_for(id).is_some())
+        has_local_session(id)
+            || (crate::session::flood_remaining_for(id) == 0
+                && crate::session::env_token_for(id).is_some())
     };
 
     // A Bot API `file_id` belongs to the bot that MINTED it — its embedded
@@ -1124,9 +1125,10 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
                 break;
             }
             Err(e) => {
-                // A FLOOD_WAIT here must stop every other request from retrying the
-                // login too — see `session::note_flood()`.
-                crate::session::note_flood(&e);
+                // Recorded against THIS bot: the wait is per token, so the next
+                // candidate — and the next request — may sign in fine. `boot()`
+                // records it too; this keeps the caller's view honest.
+                crate::session::note_flood_for(&candidate, &e);
                 log("download boot failed for bot", &serde_json::json!({"bot_id": candidate, "error": e}));
                 boot_err = Some(e);
             }
@@ -1148,7 +1150,10 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
         // A Telegram login flood is retryable and must NOT look like "your bot is
         // gone": answer 429 + retry_after so a player backs off instead of
         // hammering the login (each retry re-arms FLOOD_WAIT).
-        let flood = crate::session::flood_remaining();
+        // Advertise the wait THIS bot quoted, not a global flag: `boot()` records
+        // it per token and the error text carries the value.
+        let flood = crate::session::flood_seconds_in(boot_err.as_deref().unwrap_or(""))
+            .max(crate::session::flood_remaining_for(&bot_id));
         let status = if flood > 0 { 429 } else { 403 };
         let reason = if flood > 0 { "RATE_LIMITED" } else { "NO_SESSION" };
         record_refusal(

@@ -554,7 +554,67 @@ pub const GUEST_BOTS_PER_INSTANCE: usize = 1;
 const FLOOD_NS: &str = "telegram_flood";
 const FLOOD_KEY: &str = "global";
 
-/// Seconds left on the recorded flood wait (0 = nothing recorded / expired).
+/// The recorded wait for ONE bot token (0 = none / expired).
+///
+/// The wait is PER TOKEN, not per instance. Measured 2026-10-26 against the six
+/// `BOT_TOKENS` bots, one `POST /api/botlogin` each:
+///
+/// ```text
+/// 8990816622  FLOOD_WAIT (value: 1365)      8749344367  logged in, 376 ms
+/// 8622165803  FLOOD_WAIT (value: 1369)      8469916399  logged in, 398 ms
+/// 8848916386  FLOOD_WAIT (value: 1379)
+/// 8773958156  FLOOD_WAIT (value: 1381)
+/// ```
+///
+/// Four separate counters, each shortening on its own, while two bots signed in
+/// immediately. A single global flag therefore took two healthy bots offline to
+/// punish four, and — worse — refused logins that would have worked, turning a
+/// partial outage into a total one.
+pub fn flood_remaining_for(bot_id: &str) -> i64 {
+    let id = bot_id.trim();
+    if id.is_empty() {
+        return flood_remaining();
+    }
+    crate::cache::get(FLOOD_NS, &format!("bot:{}", id))
+        .and_then(|v| v.get("until").and_then(|u| u.as_i64()))
+        .map(|until| (until - now()).max(0))
+        .unwrap_or(0)
+}
+
+/// Record a `FLOOD_WAIT` against ONE bot token. Returns the seconds recorded.
+pub fn note_flood_for(bot_id: &str, error: &str) -> i64 {
+    let id = bot_id.trim();
+    if id.is_empty() {
+        return note_flood(error);
+    }
+    let secs = parse_flood_seconds(error);
+    if secs <= 0 {
+        return 0;
+    }
+    if secs <= flood_remaining_for(id) {
+        return secs;
+    }
+    let body = serde_json::json!({
+        "until": now() + secs,
+        "seconds": secs,
+        "recorded_at": now(),
+        "bot_id": id,
+        "error": error,
+    });
+    crate::cache::put(FLOOD_NS, &format!("bot:{}", id), &body, secs, secs);
+    log("telegram login flood wait recorded (per bot)", &body);
+    secs
+}
+
+/// Seconds of a flood wait quoted inside an error string (0 = not a flood).
+pub fn flood_seconds_in(text: &str) -> i64 {
+    parse_flood_seconds(text)
+}
+
+/// Seconds left on the recorded INSTANCE-wide wait (0 = nothing / expired).
+///
+/// Only the guest lease uses this: a guest bot has no id to key a per-token wait
+/// on until the lease answers. Every named bot uses [`flood_remaining_for()`].
 pub fn flood_remaining() -> i64 {
     crate::cache::get(FLOOD_NS, FLOOD_KEY)
         .and_then(|v| v.get("until").and_then(|u| u.as_i64()))
@@ -905,6 +965,23 @@ mod tests {
 
     /// The recorded wait must actually gate the next login — that is the whole
     /// point of the guard (a public addon otherwise retries itself into a lockout).
+    /// The wait is PER TOKEN. Measured against the six `BOT_TOKENS` bots: four
+    /// answered `FLOOD_WAIT (value: 1365/1369/1379/1381)` while two signed in in
+    /// under 400 ms. Recording one bot's wait globally took the healthy bots
+    /// offline with the sick ones and refused logins that would have worked.
+    #[test]
+    fn a_flood_wait_belongs_to_one_bot_only() {
+        let secs = note_flood_for(
+            "bot_a",
+            "bot sign-in failed: request error: rpc error 420: FLOOD_WAIT caused by \
+             auth.importBotAuthorization (value: 1365)",
+        );
+        assert_eq!(secs, 1365);
+        assert!(flood_remaining_for("bot_a") > 0, "the refused bot waits");
+        assert_eq!(flood_remaining_for("bot_b"), 0, "another token is unaffected");
+        assert_eq!(flood_remaining(), 0, "a named bot must not arm the guest gate");
+    }
+
     #[test]
     fn a_recorded_flood_wait_blocks_the_next_login() {
         assert_eq!(flood_remaining(), 0);
@@ -1087,7 +1164,10 @@ pub async fn auto_provision_guest(
     // Never attempt a login while Telegram's FLOOD_WAIT is still running: the
     // attempt would fail AND push the wait further out, which is how a retrying
     // public addon locks itself out. Answer instantly instead.
-    let flood = flood_remaining();
+    // Only the GUEST lease is gated instance-wide: it has no bot id to key on
+    // yet. A named bot's wait is per token, so a BOT_TOKENS deploy never blocks
+    // its healthy bots behind an unrelated bot's FLOOD_WAIT.
+    let flood = if env_bot_tokens().is_empty() { flood_remaining() } else { 0 };
     if flood > 0 {
         let last = flood_last_error();
         return Err(ProvisionResult::error(if last.is_empty() {
@@ -1208,23 +1288,16 @@ pub async fn auto_provision_guest(
                 });
             }
             Err(e) => {
-                note_flood(&e);
+                // Per token, and then KEEP GOING: the wait belongs to this token
+                // alone (see `flood_remaining_for`), so the next token may sign in
+                // fine — measured, 2 of 6 did while 4 were waiting. Stopping the
+                // loop here is what turned a partial outage into a total one.
+                let secs = note_flood_for(&target, &e);
                 log(
                     "env bot token failed to boot",
-                    &serde_json::json!({"bot_id": target, "error": e}),
+                    &serde_json::json!({"bot_id": target, "error": e, "flood_secs": secs}),
                 );
                 env_err = Some(format!("bot {}: {}", target, e));
-                // STOP while a login flood is running. The next token would be
-                // another `auth.ImportBotAuthorization` inside the retry window —
-                // the one thing that makes the wait LONGER. With 7 env tokens this
-                // loop could add six doomed logins to every wait it discovered.
-                if flood_remaining() > 0 {
-                    log(
-                        "env bot token loop stopped (login flood)",
-                        &serde_json::json!({"remaining_secs": flood_remaining()}),
-                    );
-                    break;
-                }
             }
         }
     }
@@ -1422,11 +1495,35 @@ async fn lease_guest_bot(tg: &crate::telegram::TelegramPool) -> Result<Provision
                 });
             }
             Err(e) => {
-                note_flood(&e);
+                // PER TOKEN, and then straight on to the NEXT lease. A FLOOD_WAIT
+                // belongs to the one bot Telegram refused, so it must never end the
+                // provision — and it must never arm the instance-wide gate, which is
+                // what made the following attempt fail before it even started.
+                let flood_secs = note_flood_for(&target, &e);
                 log(
                     "auto provision login failed",
-                    &serde_json::json!({"error": e, "bot_id": target, "attempt": attempt + 1}),
+                    &serde_json::json!({
+                        "error": e,
+                        "bot_id": target,
+                        "attempt": attempt + 1,
+                        "flood_secs": flood_secs,
+                    }),
                 );
+                last_error = Some(e.clone());
+                if flood_secs > 0 {
+                    // Do NOT report this bot as failed at the origin: the wait is
+                    // temporary, and retiring it would permanently remove a healthy
+                    // bot from every guest's pool. Just lease a different one.
+                    log(
+                        "leased guest bot is flood-waited; leasing the next bot",
+                        &serde_json::json!({
+                            "bot_id": target,
+                            "remaining_secs": flood_remaining_for(&target),
+                            "attempt": attempt + 1,
+                        }),
+                    );
+                    continue;
+                }
                 if is_clock_or_authkey_error(&e) {
                     return Err(friendly_login_error(&e));
                 }
@@ -1438,7 +1535,7 @@ async fn lease_guest_bot(tg: &crate::telegram::TelegramPool) -> Result<Provision
                 // leave it behind, so the next lease mints a fresh one.
                 crate::credentials::clear_auth_token();
                 report_failed_lease(&target, &ticket, &device_id, &e).await;
-                last_error = Some(e);
+                continue;
             }
         }
     }
