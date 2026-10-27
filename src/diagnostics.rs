@@ -832,6 +832,15 @@ pub async fn flush_pending() -> (usize, usize) {
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
                 continue;
             }
+            // SKIP what is already uploaded. `report_send()` returns `true` for a
+            // file that carries a `.sent` marker (that is its idempotency guard),
+            // so counting its return value made `diag flush {"sent":N}` report
+            // every older report as freshly uploaded: the 2026-10-22 line said
+            // `sent:11` while eight of those files were already marked, and a
+            // genuinely failing origin would still have looked like a success.
+            if std::path::PathBuf::from(format!("{}.sent", path.display())).is_file() {
+                continue;
+            }
             if report_send(&path).await {
                 sent += 1;
             } else {

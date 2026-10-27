@@ -612,6 +612,15 @@ pub async fn stream_files_by_title(
     year: &str,
     id: &str,
 ) -> (String, String, Vec<WpFile>) {
+    // With NO title AND NO id there is nothing to search: the origin would answer
+    // `400 "title or id required"` and `cached_wp_json` would retry it once, so
+    // skip the round-trip. An id WITHOUT a title is a valid call: the origin
+    // resolves the identity from the id (`resolved_title`) and answers an empty
+    // `items` list when it has never indexed it, which is exactly what the
+    // id-only probe at `routes.rs` relies on.
+    if title.trim().is_empty() && id.trim().is_empty() {
+        return (title.to_string(), String::new(), Vec::new());
+    }
     let mut params = vec![
         ("type".to_string(), media_type.to_string()),
         ("title".to_string(), title.to_string()),

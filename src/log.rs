@@ -126,7 +126,18 @@ pub fn log(message: &str, ctx: &Value) {
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = f.write_all(line.as_bytes());
     }
-    eprint!("[PencariMovie Server] {}{}\n", message, suffix);
+    // SAME GUARD AS `stderr_log()`, and for the same documented reason (see the
+    // note on `silence_stderr` above): `eprint!` PANICS when the write fails, so
+    // a process whose console has gone away (tray `FreeConsole()`, a closed
+    // terminal, a detached daemon) killed the calling task on its very next log
+    // line. Measured on this workstation: an instance whose terminal was gone
+    // answered `/api/version` (does not log) with 200 while `/stream`, `/manifest.json`,
+    // `/api/diagnostics` and `/api/download` closed the connection with NO
+    // response in 0.2-0.5 s — the exact signature of a panicking handler. A fresh
+    // process with a live stderr served the same download at 5.3 MB/s.
+    if STDERR_LIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        eprint!("[PencariMovie Server] {}{}\n", message, suffix);
+    }
     limit_file_size(&path, MAX_LOG_SIZE);
 }
 

@@ -571,7 +571,20 @@ pub fn map_invocation_error(e: InvocationError) -> GramErr {
             };
             GramErr {
                 message: format!("{} ({})", rpc.name, rpc.code),
-                file_reference: rpc.name.contains("FILE_REFERENCE") || rpc.name.contains("FILE_MIGRATE"),
+                // `AUTH_BYTES_INVALID` belongs here too. Telegram documents it as
+                // "The provided authorization is invalid" — the file_id carries
+                // auth bytes bound to the session/bot that MINTED it, so an id
+                // resolved for bot A and fetched by bot B always fails this way,
+                // and so does a raw file_id pasted from another client. It is the
+                // same recoverable condition as a dead reference: re-resolve once
+                // against the bot that will actually download. Without it the
+                // error fell through to a fatal `500 DOWNLOAD_FAILED`, which is
+                // the top playback incident in the origin table (137 of the newest
+                // 500 rows, e.g. `short_code=SmEdhz`, bot 8938418955 — while the
+                // same short code streamed fine locally through bot 7791686977).
+                file_reference: rpc.name.contains("FILE_REFERENCE")
+                    || rpc.name.contains("FILE_MIGRATE")
+                    || rpc.name.contains("AUTH_BYTES"),
                 flood_wait,
                 transport: false,
             }
