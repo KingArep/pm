@@ -352,6 +352,70 @@ fn truthy_ok(v: &Value) -> bool {
 /// How long a stale WordPress body may still be served when a refresh fails.
 const WP_STALE_GRACE: i64 = 21_600;
 
+/// How long we are willing to WAIT for a fresh body when a stale copy already
+/// exists.
+///
+/// A stale copy is always better than a hang: the viewer is staring at an empty
+/// episode list. Measured on a real browse, `stream-files` for one episode timed
+/// out twice in a row — 15 s + 400 ms + 15 s — and only THEN fell back to the
+/// stale copy that was sitting in the cache the whole time. Three seconds covers
+/// a healthy origin by a wide margin (a warm call measures ~0.4-0.8 s) and turns
+/// the worst case for a known-but-slow title into 3 s instead of 30 s.
+const WP_STALE_BUDGET_S: u64 = 3;
+
+/// How long the origin is treated as DOWN after a call that never completed.
+///
+/// The episode path asks the origin TWICE before it can build a list — once for
+/// `…/stream-files?title=X&id=…` and again for
+/// `…/stream-files?season=1&episode=8&limit=250&title=X&id=…` — and each has its
+/// own 15 s budget. Measured with the origin unreachable: 15 s + 15 s + the probe
+/// ladder = **33-45 s per episode**, paid again for every episode the viewer opens.
+///
+/// A transport timeout is not a property of ONE url: it is the origin being gone.
+/// So the first `status == 0` arms this gate and every later call fails fast
+/// instead of re-discovering the same outage. 20 s is short enough that a blip
+/// recovers on its own and long enough to cover one browse.
+const WP_DOWN_SECS: i64 = 20;
+
+/// Until this instant the origin counts as down (`0` = healthy).
+static WP_DOWN_UNTIL: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// How long the origin is considered unreachable, in seconds (0 = healthy).
+pub fn wp_origin_down_secs() -> i64 {
+    let until = WP_DOWN_UNTIL.load(std::sync::atomic::Ordering::Relaxed);
+    (until - crate::storage::now()).max(0)
+}
+
+/// Arm or clear the gate from a call's final status (`0` = never completed).
+///
+/// Public so a hand-rolled origin call elsewhere — the music search is one — keeps
+/// the same bookkeeping instead of growing its own private copy.
+pub fn wp_note_status(status: u16) {
+    if status == 0 {
+        note_wp_origin_down();
+    } else {
+        note_wp_origin_answered(status);
+    }
+}
+
+fn note_wp_origin_down() {
+    let until = crate::storage::now() + WP_DOWN_SECS;
+    WP_DOWN_UNTIL.store(until, std::sync::atomic::Ordering::Relaxed);
+    log(
+        "wp origin marked down - later calls fail fast",
+        &serde_json::json!({"for_secs": WP_DOWN_SECS}),
+    );
+}
+
+/// Any completed answer clears the gate — including a real `{"ok":0}` miss, which
+/// proves the origin is alive even though this particular query found nothing.
+fn note_wp_origin_answered(status: u16) {
+    if status != 0 && wp_origin_down_secs() > 0 {
+        WP_DOWN_UNTIL.store(0, std::sync::atomic::Ordering::Relaxed);
+        log("wp origin answering again - gate cleared", &serde_json::json!({}));
+    }
+}
+
 /// Did the call fail to answer at all?
 ///
 /// `http_json()` collapses a transport error, a timeout and every 5xx into an
@@ -369,26 +433,66 @@ fn needs_wp_retry(body: &Value) -> bool {
 /// The old version had **no single-flight**: a burst of cold requests for the same
 /// URL all opened their own WordPress connection (the PHP guarded this with a
 /// `flock`). `fetch_cached` coalesces them into one call.
+///
+/// Two waits used to stack on top of each other here, and both are bounded now:
+///
+///   • **A timeout was retried at full length.** `needs_wp_retry()` cannot tell a
+///     spent timeout from a fast 5xx, so a 15 s timeout bought another 15 s —
+///     measured on `stream-files` for one episode, twice in a row. The status is
+///     now checked ([`http_json_h_status`]): a retry only happens when the origin
+///     ANSWERED (5xx); `status == 0` means the whole timeout was already spent,
+///     and paying it again only delays the stale answer.
+///   • **The stale copy was consulted last.** It sat in the cache while the
+///     request burned 30 s. When a stale copy exists the fresh attempt is now
+///     bounded by [`WP_STALE_BUDGET_S`], so the block is 3 s at worst.
 pub async fn cached_wp_json(url: &str, ttl: i64, timeout_secs: u64) -> Value {
     let url_owned = url.to_string();
+    // Decided OUTSIDE the single-flight closure: whether a usable old copy exists
+    // is what sets the budget, and the closure runs once for every waiter.
+    let has_stale = crate::cache::get_stale("wp_json", url).is_some();
+    let budget = if has_stale {
+        timeout_secs.min(WP_STALE_BUDGET_S)
+    } else {
+        timeout_secs
+    };
     let body = crate::cache::fetch_cached("wp_json", url, ttl, WP_STALE_GRACE, move || async move {
-        let mut fresh = http_json(&url_owned, &[], "GET", timeout_secs).await;
-        // One retry when the call did not answer at all. `http_json()` returns an
-        // EMPTY object for a transport error or a 5xx (`{"ok":0,…}` bodies are
-        // real answers and are left alone), and an empty body here is fatal: the
-        // series/episode list is built from it, so a cold cache plus one origin
-        // 504 answered "No Streams Found" — reproduced on `mal:54492:2:7` and
-        // `mal:54492:2:12`, where the same episodes listed 9 and 7 streams a
-        // minute later. Nothing else fails over in that window: the stale copy
-        // is what usually covers this, and a fresh process has none.
-        if needs_wp_retry(&fresh) {
+        // The previous call already spent a full timeout on this origin: paying
+        // another one here is what made a cold episode cost 30 s twice over. The
+        // gate is armed by ANY transport failure, not by this particular url, so
+        // the second `stream-files` of the same episode fails in microseconds.
+        let down = wp_origin_down_secs();
+        if down > 0 {
+            log(
+                "wp origin down - failing fast",
+                &serde_json::json!({"url": url_owned, "for_secs": down}),
+            );
+            return (Value::Object(serde_json::Map::new()), false);
+        }
+        let (mut fresh, mut status) = http_json_h_status(&url_owned, &[], "GET", budget, &[]).await;
+        // Retry ONLY a failure the origin actually answered. `status == 0` is a
+        // transport error or a timeout: the budget is gone, and the old code spent
+        // a second full timeout on it (`wp request empty, retrying once`) before
+        // the stale fallback ever ran.
+        if needs_wp_retry(&fresh) && status != 0 {
             log(
                 "wp request empty, retrying once",
-                &serde_json::json!({"url": url_owned}),
+                &serde_json::json!({"url": url_owned, "status": status}),
             );
             tokio::time::sleep(Duration::from_millis(400)).await;
-            fresh = http_json(&url_owned, &[], "GET", timeout_secs).await;
+            let again = http_json_h_status(&url_owned, &[], "GET", budget, &[]).await;
+            fresh = again.0;
+            status = again.1;
+        } else if needs_wp_retry(&fresh) {
+            // Worth a line of its own: this is the case that used to double the
+            // wait, and its frequency is the signal that the origin is unhealthy.
+            log(
+                "wp request timed out - not retrying, serving stale if held",
+                &serde_json::json!({"url": url_owned, "budget_secs": budget}),
+            );
         }
+        // Arm or clear the gate from the FINAL outcome, so the next request knows
+        // whether the origin is worth waiting on.
+        wp_note_status(status);
         let cacheable = truthy_ok(&fresh);
         (fresh, cacheable)
     })

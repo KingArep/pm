@@ -1528,6 +1528,11 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
                     "ok": 1,
                     "total": result.total,
                     "resolved": result.resolved,
+                    // Queued at the origin is NOT failed: the origin's own paced
+                    // drain is already fetching these. Reported apart so a caller
+                    // never retries them inline and never suppresses them.
+                    "queued": result.pending,
+                    "queued_codes": result.pending_codes,
                     "failed": result.failed,
                     "failed_codes": result.failed_codes,
                     "results": result.results,
@@ -1632,6 +1637,8 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
                 "ok": 1,
                 "total": result.total,
                 "resolved": result.resolved,
+                "queued": result.pending,
+                "queued_codes": result.pending_codes,
                 "failed": result.failed,
                 "failed_codes": result.failed_codes,
                 "results": result.results,
@@ -2592,7 +2599,11 @@ async fn resolve_episode_files_with(
         if !queries.is_empty() {
             let results = futures_util::future::join_all(queries.iter().map(|q| {
                 let q = q.clone();
-                async move { crate::wp_data::search_files(&q, 50).await }
+                // `search_files_probe`, not `search_files`: speculative work gets a
+                // short budget, so a sick origin cannot hold the list open. Measured:
+                // 13 probes, all timing out, only made the same empty list arrive
+                // slower.
+                async move { crate::wp_data::search_files_probe(&q, 50).await }
             }))
             .await;
             for (i, _q) in queries.iter().enumerate() {
@@ -3287,10 +3298,11 @@ async fn build_streams_from_files(
     // Bot API file_id is resolved on the first Range request — the Kotlin app got
     // an instant Play out of exactly this and the port did not. Background, so the
     // list still returns immediately; a resolve error only logs.
-    // Order matters: `prewarm_streams_batch` resolves at most `PREWARM_LIMIT`
-    // codes per pass, so the members of a duplicate-name group — the only rows a
-    // runtime can classify — go first. Otherwise a list full of other groups'
-    // codes leaves them cold load after load.
+    // Order matters: one prefetch pass is bounded (PREWARM_HARD_CAP) and the
+    // origin's own queue is capped at 40 pending codes newest-first, so the
+    // members of a duplicate-name group — the only rows a runtime can classify —
+    // go first. Otherwise a list full of other groups' codes leaves them cold
+    // load after load.
     let mut name_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for item in items.iter() {
@@ -6562,69 +6574,189 @@ fn prioritise_home_country(catalogs: Vec<Value>, settings: &Value) -> Vec<Value>
 
 /* ── Eclipse music (backend.php:13568-14259) ─────────────────────────────── */
 
+/// How long a music search answer is reused.
+///
+/// The `t=` cache-buster exists so a newly indexed track is never hidden by an
+/// INTERMEDIATE cache (the documented "freshly added track does not match" bug).
+/// It was never a reason for us to keep no answer at all — that made the music
+/// browser the one screen that went blank whenever the origin hiccuped, while
+/// every video list survived on stale cache. 60 s keeps a fresh upload visible
+/// almost immediately and still lets a browse burst reuse one call.
+const MUSIC_SEARCH_TTL: i64 = 60;
+
+/// How long a music answer may be served STALE (same 6 h as `WP_STALE_GRACE`).
+const MUSIC_STALE_GRACE: i64 = 21_600;
+
 /// `{WP_API_BASE}/search-music?search=…&limit=…&t=…` → formatted `track` objects.
 ///
-/// Called **directly** rather than through `fetch_stream_ajax`: the music search
-/// is the one endpoint with a meaningful cache-buster (`t=<unixtime>`), because a
-/// newly indexed track is invisible behind a cached page for minutes (the
-/// documented "freshly added track does not match" bug).
+/// NOW BEHAVES LIKE THE STREAM PATH: cache + single-flight + stale fallback, and
+/// the same origin circuit breaker. The `t=<unixtime>` buster stays in the OUTBOUND
+/// url (it defeats an intermediate cache) but is deliberately NOT part of our cache
+/// key, which is what made every query a guaranteed cold call before.
+///
+/// Observed live with the origin failing: `search-music` returned `rows:0` on every
+/// query, so the music browser showed nothing at all — while `/stream` on the same
+/// origin still answered from its stale copy. That asymmetry is what this fixes.
 async fn eclipse_search(query: &str, limit: usize) -> Vec<Value> {
-    let url = format!(
-        "{}/search-music?search={}&limit={}&offset=0&t={}",
-        crate::config::wp_api_base().trim_end_matches('/'),
-        urlencode_component(query),
-        limit,
-        crate::storage::now()
-    );
-    let mut res = crate::httpc::http_json(&url, &[], "GET", 15).await;
-    if res.is_null() {
-        // ONE retry, because a transport blip used to reach the user as "no
-        // tracks at all". Measured on a CPH2581: two consecutive
-        // `/search-music?search=wildflower` calls logged
-        // `http_json failed {"error":"error sending request"}` and the addon
-        // answered `{"tracks":[]}`; the very next call for the same query
-        // returned 39 rows. The client paints an empty list on that, and the
-        // user reads it as "the song is not there".
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        res = crate::httpc::http_json(&url, &[], "GET", 15).await;
+    // Key WITHOUT the cache-buster: same query + limit = same answer.
+    let key = format!("{}|{}", limit, query.trim().to_ascii_lowercase());
+    let q_owned = query.to_string();
+    let body = crate::cache::fetch_cached(
+        "music_search",
+        &key,
+        MUSIC_SEARCH_TTL,
+        MUSIC_STALE_GRACE,
+        move || async move {
+            // Shared breaker: once the origin has failed to answer, do not spend
+            // another 15 s here.
+            let down = crate::httpc::wp_origin_down_secs();
+            if down > 0 {
+                log(
+                    "wp origin down - music search skipped",
+                    &serde_json::json!({"q": q_owned, "for_secs": down}),
+                );
+                return (Value::Null, false);
+            }
+            let url = format!(
+                "{}/search-music?search={}&limit={}&offset=0&t={}",
+                crate::config::wp_api_base().trim_end_matches('/'),
+                urlencode_component(&q_owned),
+                limit,
+                crate::storage::now()
+            );
+            let (mut res, mut status) =
+                crate::httpc::http_json_h_status(&url, &[], "GET", 15, &[]).await;
+            if res.is_null() && status != 0 {
+                // ONE retry, because a transport blip used to reach the user as "no
+                // tracks at all". Measured on a CPH2581: two consecutive
+                // `/search-music?search=wildflower` calls logged
+                // `http_json failed {"error":"error sending request"}` and the addon
+                // answered `{"tracks":[]}`; the very next call for the same query
+                // returned 39 rows. The client paints an empty list on that, and the
+                // user reads it as "the song is not there".
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                let again = crate::httpc::http_json_h_status(&url, &[], "GET", 15, &[]).await;
+                res = again.0;
+                status = again.1;
+            } else if res.is_null() {
+                // `status == 0` = the whole 15 s was already spent. Retrying would
+                // double it for a request the origin is demonstrably not answering —
+                // the same trap that made the episode list take 30 s.
+                log(
+                    "music search timed out - not retrying",
+                    &serde_json::json!({"q": q_owned}),
+                );
+            }
+            crate::httpc::wp_note_status(status);
+            // A failed call is NOT cacheable: storing it would pin an empty music
+            // browser for the whole TTL, which is exactly the bug being fixed.
+            if status == 0 {
+                return (Value::Null, false);
+            }
+            let rows = if let Some(arr) = res.as_array() {
+                arr.clone()
+            } else {
+                res.get("tracks")
+                    .or_else(|| res.get("items"))
+                    .or_else(|| res.get("files"))
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            let tracks: Vec<Value> = rows
+                .iter()
+                .filter(|r| !str_at(r, "short_code").is_empty())
+                .map(crate::eclipse::format_track)
+                .collect();
+            // The ORIGIN'S ORDER IS THE RANKING — do not re-sort here.
+            //
+            // This used to sort by `quality_score(format, duration)`, which silently
+            // overrode the origin's size-first ranking (with a rip-title penalty).
+            // That is why the phone listed `05.WILDFLOWER.flac` (47.3 MB) ABOVE
+            // `05.WILDFLOWER.m4a` (48.9 MB): same album, the bigger file was demoted
+            // because the other one is FLAC. The track shape this route returns
+            // carries no size at all, so the engine has nothing to rank by — it can
+            // only preserve or destroy the origin's order, and destroying it was the
+            // bug.
+            //
+            // One line per query: "the client found nothing to play" and "we
+            // answered nothing" look identical from the player, so log both sides.
+            log(
+                "music search",
+                &serde_json::json!({
+                    "q": q_owned,
+                    "limit": limit,
+                    "rows": rows.len(),
+                    "tracks": tracks.len(),
+                }),
+            );
+            (Value::Array(tracks), true)
+        },
+    )
+    .await;
+
+    let tracks: Vec<Value> = body.as_array().cloned().unwrap_or_default();
+    if !tracks.is_empty() {
+        music_prewarm(&tracks);
+        return tracks;
     }
-    let rows = if let Some(arr) = res.as_array() {
-        arr.clone()
-    } else {
-        res.get("tracks")
-            .or_else(|| res.get("items"))
-            .or_else(|| res.get("files"))
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default()
-    };
-    let tracks: Vec<Value> = rows
-        .iter()
-        .filter(|r| !str_at(r, "short_code").is_empty())
-        .map(crate::eclipse::format_track)
-        .collect();
-    // The ORIGIN'S ORDER IS THE RANKING — do not re-sort here.
-    //
-    // This used to sort by `quality_score(format, duration)`, which silently
-    // overrode the origin's size-first ranking (with a rip-title penalty). That
-    // is why the phone listed `05.WILDFLOWER.flac` (47.3 MB) ABOVE
-    // `05.WILDFLOWER.m4a` (48.9 MB): same album, the bigger file was demoted
-    // because the other one is FLAC. The track shape this route returns carries
-    // no size at all, so the engine has nothing to rank by — it can only
-    // preserve or destroy the origin's order, and destroying it was the bug.
-    //
-    // One line per query: "the client found nothing to play" and "we answered
-    // nothing" look identical from the player, so log both sides.
-    log(
-        "music search",
-        &serde_json::json!({
-            "q": query,
-            "limit": limit,
-            "rows": rows.len(),
-            "tracks": tracks.len(),
-        }),
-    );
+    // Same stale fallback the stream path has: a known album beats a blank screen.
+    if let Some(stale) = crate::cache::get_stale("music_search", &key) {
+        if let Some(arr) = stale.as_array() {
+            if !arr.is_empty() {
+                log(
+                    "music search served stale",
+                    &serde_json::json!({"q": query, "tracks": arr.len()}),
+                );
+                let out = arr.clone();
+                music_prewarm(&out);
+                return out;
+            }
+        }
+    }
     tracks
+}
+
+/// How many of a search's top tracks to warm.
+///
+/// A viewer plays one track at a time and almost always one of the first few, so
+/// this is deliberately small: the origin's prewarm queue is shared with video and
+/// capped at 40, and a 120-track "latest" listing must not own it.
+const MUSIC_PREWARM_LIMIT: usize = 8;
+
+/// Warm the ids of the tracks at the top of a music search — the SAME cheap batch
+/// the stream path uses.
+///
+/// [`eclipse_stream`] consults `resolve_shortcode_cached` before doing anything, so
+/// a warmed track plays **without ever touching `/resolve-file`**. That is the whole
+/// point: when the origin's relay subsystem is saturated it answers `503 Server busy
+/// resolving file` to every cold resolve, and a cold track is then simply skipped by
+/// the player. Measured in this session: `ZMIPWf` took five consecutive 503s and a
+/// 20 s budget exhaustion because nothing had ever warmed it, while `l13Asn` — which
+/// had a cached id — played straight through the same outage.
+///
+/// Never blocks and never fails the search: `prewarm_streams_batch_limited` skips
+/// itself while a stream is playing or the origin cooldown is armed.
+fn music_prewarm(tracks: &[Value]) {
+    let bot = get_bot_id();
+    if bot.is_empty() {
+        return;
+    }
+    let codes: Vec<String> = tracks
+        .iter()
+        .take(MUSIC_PREWARM_LIMIT)
+        .map(|t| str_at(t, "id"))
+        .filter(|c| !c.is_empty())
+        .collect();
+    if codes.is_empty() {
+        return;
+    }
+    crate::resolve::prewarm_streams_batch_limited(
+        codes,
+        &bot,
+        "music",
+        MUSIC_PREWARM_LIMIT,
+    );
 }
 
 fn str_at(v: &Value, key: &str) -> String {

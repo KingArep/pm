@@ -50,6 +50,18 @@ fn ajax_timeout(action: &str) -> u64 {
     }
 }
 
+/// A probe is SPECULATIVE — it exists to fill in a list that is already thin.
+///
+/// The episode ladder fires every spelling of an episode number at once
+/// (`EP5`, `E5`, `EP05`, `E05`, `S01E05`, each with and without the year), so one
+/// unhealthy origin costs the full timeout for the whole batch. Measured while
+/// browsing: 13 probes, all 13 transport failures, and the list then came back
+/// empty anyway. A speculative probe that has not answered in 3 s is not going to
+/// rescue the list; letting it run to 6 s only delays the answer the viewer gets.
+fn probe_timeout() -> u64 {
+    3
+}
+
 /// `post_files` -> `/post-files`.
 fn rest_route(action: &str) -> String {
     format!(
@@ -126,12 +138,32 @@ fn is_empty_payload(v: &Value) -> bool {
 /// `fd_fetch_stream_ajax()` layer uses — so a freshly uploaded episode shows up
 /// almost immediately. A longer TTL here means a new release can stay invisible
 /// for minutes after the PHP would already list it.
+///
+/// KEPT AT THE PHP'S 15 s ON PURPOSE. Raising it was considered while fixing the
+/// slow episode list and rejected on evidence: the cache key includes season AND
+/// episode, so `…:1:4` and `…:1:5` are different entries — a longer TTL would NOT
+/// have made episode-to-episode browsing any faster. It only covers a REPEAT view
+/// of the same episode (player retries, back-navigation), and the price is that a
+/// brand-new upload stays invisible for that much longer. The 30 s stall came from
+/// retrying a spent timeout and consulting the stale copy last, both fixed in
+/// [`crate::httpc::cached_wp_json`] — not from this number.
 pub const PER_EPISODE_SEARCH_TTL: i64 = 15;
 
 /// `fd_fetch_stream_ajax()`: cache + single-flight + stale fallback, `bot_id` added
 /// when the caller did not supply one (the origin resolves files per bot, so a
 /// missing `bot_id` changes the answer, not just the cache key).
 pub async fn fetch_stream_ajax(action: &str, params: &[(String, String)]) -> Value {
+    fetch_stream_ajax_timeout(action, params, None).await
+}
+
+/// [`fetch_stream_ajax()`] with an explicit timeout, for a SPECULATIVE caller that
+/// must not hold the request open for the action's full budget — see
+/// [`probe_timeout()`].
+pub async fn fetch_stream_ajax_timeout(
+    action: &str,
+    params: &[(String, String)],
+    timeout_secs: Option<u64>,
+) -> Value {
     let mut params: Vec<(String, String)> = params.to_vec();
     if stream_ajax_wants_bot(action) && !params.iter().any(|(k, _)| k == "bot_id") {
         let bot = crate::session::get_bot_id();
@@ -148,9 +180,21 @@ pub async fn fetch_stream_ajax(action: &str, params: &[(String, String)]) -> Val
     let url_owned = url.clone();
     let action_owned = action.to_string();
     let body = crate::cache::fetch_cached("wp_ajax", &key, ttl, AJAX_STALE_GRACE, move || async move {
+        // Same gate as `cached_wp_json`: once the origin has failed to answer, a
+        // speculative probe is the LAST thing worth waiting on. Without this the
+        // episode ladder fired 13 searches at a dead origin, every one burning its
+        // full budget, and still returned an empty list.
+        let down = httpc::wp_origin_down_secs();
+        if down > 0 {
+            log(
+                "wp origin down - probe skipped",
+                &serde_json::json!({"action": action_owned, "for_secs": down}),
+            );
+            return (Value::Null, false);
+        }
         let body = httpc::get_contents(
             &url_owned,
-            ajax_timeout(&action_owned),
+            timeout_secs.unwrap_or_else(|| ajax_timeout(&action_owned)),
             [("Accept".to_string(), "application/json".to_string())]
                 .into_iter()
                 .collect(),
@@ -702,6 +746,29 @@ pub async fn stream_files_episode(
 /// (`fd_search_files_parallel()`, backend.php:9881).
 pub async fn search_files(search: &str, limit: usize) -> Vec<WpFile> {
     search_files_at(search, limit, 0).await
+}
+
+/// [`search_files()`] for the speculative episode ladder: same query, a much
+/// shorter budget ([`probe_timeout()`]).
+///
+/// The ladder fires every spelling of an episode number AT ONCE, so one unhealthy
+/// origin costs the whole batch the full timeout. Measured while browsing
+/// `VisionQuest` S01E05: 13 probes, 13 transport failures, and the list came back
+/// empty anyway — the 6 s budget bought nothing but a slower failure.
+pub async fn search_files_probe(search: &str, limit: usize) -> Vec<WpFile> {
+    if search.trim().is_empty() {
+        return Vec::new();
+    }
+    let params = vec![
+        ("search".to_string(), search.to_string()),
+        ("limit".to_string(), limit.to_string()),
+        ("offset".to_string(), "0".to_string()),
+    ];
+    let res = fetch_stream_ajax_timeout("search_files", &params, Some(probe_timeout())).await;
+    rows_of(&res, &["files", "items"])
+        .iter()
+        .filter_map(wp_file_from)
+        .collect()
 }
 
 /// `search_files` with an `offset`, for the paged Telegram-FILE catalogs
