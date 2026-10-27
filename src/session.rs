@@ -963,6 +963,23 @@ mod tests {
         assert_eq!(parse_flood_seconds(""), 0);
     }
 
+    /// Both flood tests below read and write the ONE instance-wide key, and
+    /// `cargo test` runs test functions on parallel threads of a single process.
+    /// The 30 s wait that `a_recorded_flood_wait_blocks_the_next_login` records
+    /// was therefore exactly what `flood_remaining()` returned while the test
+    /// below asserted 0 (`left: 30, right: 0`) — a shared-state race, not a
+    /// behaviour bug, because the cache is per-process global. Serialize the two
+    /// and start each from a clean `telegram_flood` namespace.
+    static FLOOD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn flood_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        // A panicking sibling poisons the lock; the cache is disposable, so take
+        // the inner guard rather than cascading one failure into both tests.
+        let guard = FLOOD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::cache::clear(Some(FLOOD_NS));
+        guard
+    }
+
     /// The recorded wait must actually gate the next login — that is the whole
     /// point of the guard (a public addon otherwise retries itself into a lockout).
     /// The wait is PER TOKEN. Measured against the six `BOT_TOKENS` bots: four
@@ -971,6 +988,7 @@ mod tests {
     /// offline with the sick ones and refused logins that would have worked.
     #[test]
     fn a_flood_wait_belongs_to_one_bot_only() {
+        let _guard = flood_test_guard();
         let secs = note_flood_for(
             "bot_a",
             "bot sign-in failed: request error: rpc error 420: FLOOD_WAIT caused by \
@@ -984,6 +1002,7 @@ mod tests {
 
     #[test]
     fn a_recorded_flood_wait_blocks_the_next_login() {
+        let _guard = flood_test_guard();
         assert_eq!(flood_remaining(), 0);
         let secs = note_flood(
             "rpc error 420: FLOOD_WAIT caused by auth.importBotAuthorization (value: 30)",
