@@ -167,6 +167,25 @@ pub async fn manifest_json(url: &str) -> Value {
     decoded
 }
 
+/// Fetch upstream manifests in bounded parallel batches, keeping configured order.
+///
+/// Cold addon/catalog requests used to pay each upstream's network latency one at a
+/// time. Four concurrent checks reduce that wait without creating unbounded fan-out
+/// when a user configures many upstreams.
+const UPSTREAM_FANOUT: usize = 4;
+
+async fn manifests_for(upstreams: &[Upstream]) -> Vec<Value> {
+    let mut manifests = Vec::with_capacity(upstreams.len());
+    for batch in upstreams.chunks(UPSTREAM_FANOUT) {
+        let batch_manifests = futures_util::future::join_all(
+            batch.iter().map(|up| manifest_json(&up.url)),
+        )
+        .await;
+        manifests.extend(batch_manifests);
+    }
+    manifests
+}
+
 /// `fd_manifest_has_resource()`: accepts both `"resources": ["subtitles"]` and
 /// the object form `"resources": [{"name":"subtitles", …}]`.
 pub fn has_resource(manifest: &Value, resource: &str) -> bool {
@@ -200,9 +219,10 @@ pub async fn with_resource(
     resource: &str,
     respect_master_switch: bool,
 ) -> Vec<Upstream> {
+    let upstreams = configured(settings, respect_master_switch);
+    let manifests = manifests_for(&upstreams).await;
     let mut out = Vec::new();
-    for up in configured(settings, respect_master_switch) {
-        let m = manifest_json(&up.url).await;
+    for (up, m) in upstreams.into_iter().zip(manifests) {
         if s(&m, "id").is_empty() {
             out.push(up);
             continue;
@@ -305,8 +325,9 @@ pub async fn bridged_catalogs(settings: &Value) -> (Vec<Value>, Vec<String>) {
     }
     let mut catalogs: Vec<Value> = Vec::new();
     let mut types: Vec<String> = Vec::new();
-    for up in configured(settings, true) {
-        let m = manifest_json(&up.url).await;
+    let upstreams = configured(settings, true);
+    let manifests = manifests_for(&upstreams).await;
+    for (up, m) in upstreams.into_iter().zip(manifests) {
         let Some(list) = m.get("catalogs").and_then(|v| v.as_array()) else {
             continue;
         };
@@ -546,33 +567,39 @@ pub async fn streams(settings: &Value, item_type: &str, item_id: &str) -> Vec<Va
     if item_id.starts_with("pm:") || item_id.starts_with("pm_") {
         return Vec::new();
     }
+    let upstreams = with_resource(settings, "stream", true).await;
     let mut out: Vec<Value> = Vec::new();
-    for up in with_resource(settings, "stream", true).await {
-        let base = base_of(&up.url);
-        let target = format!(
-            "{}/stream/{}/{}.json",
-            base,
-            urlencode(item_type),
-            urlencode(item_id)
-        );
-        let body = http_json(&target, &[], "GET", 4).await;
-        let Some(list) = body.get("streams").and_then(|v| v.as_array()) else {
-            continue;
-        };
-        let mut added = 0usize;
-        for item in list {
-            let playable = ["url", "infoHash", "externalUrl"]
-                .iter()
-                .any(|k| !s(item, k).is_empty());
-            if playable {
-                out.push(item.clone());
-                added += 1;
+    for batch in upstreams.chunks(UPSTREAM_FANOUT) {
+        let responses = futures_util::future::join_all(batch.iter().map(|up| async move {
+            let base = base_of(&up.url);
+            let target = format!(
+                "{}/stream/{}/{}.json",
+                base,
+                urlencode(item_type),
+                urlencode(item_id)
+            );
+            (up, http_json(&target, &[], "GET", 4).await)
+        }))
+        .await;
+        for (up, body) in responses {
+            let Some(list) = body.get("streams").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let mut added = 0usize;
+            for item in list {
+                let playable = ["url", "infoHash", "externalUrl"]
+                    .iter()
+                    .any(|k| !s(item, k).is_empty());
+                if playable {
+                    out.push(item.clone());
+                    added += 1;
+                }
             }
+            log(
+                "upstream streams merged",
+                &json!({"from": up.name, "id": item_id, "added": added}),
+            );
         }
-        log(
-            "upstream streams merged",
-            &json!({"from": up.name, "id": item_id, "added": added}),
-        );
     }
     out
 }
