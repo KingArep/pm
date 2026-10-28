@@ -21,12 +21,15 @@ docker compose up -d` in a code block for a container, "install the newest APK" 
 ### Changed
 
 - **The dashboard's Addon section is `#addon`** (was `#connect`), and the header nav item
-  says "Addon". `#connect`, `#configure` and the PHP-era `#settings` still resolve through
-  the legacy map, so links already out there keep working.
-- **Stremio's configure gear works.** It opens `<transport>/configure`, which for this
-  server is `/<token>/manifest.json/configure` — that answered 404, so the gear was dead in
-  every client. All four spellings now redirect to `/#catalogs`, because configuring this
-  addon means choosing the rows and filters it publishes.
+  says "Addon". `#connect` and the PHP-era `#settings` still resolve through the legacy
+  map, so links already out there keep working.
+- **Stremio's configure gear works, and it opens Catalogs.** It asks for
+  `<transport>/configure`, which for this server is `/<token>/manifest.json/configure`;
+  that answered 404, so the gear was dead in every client. All four spellings now redirect
+  to `/#catalogs`, because configuring this addon means choosing the rows and filters it
+  publishes, while Addon only shows the address. The bare `#configure` link means the same
+  thing now, which also fixes the "Streams Filtered Out" card in the stream list: it links
+  to `#configure` and used to land on Addon, nowhere near the filters it told you to change.
 - **The streams-list update notice is a notification, not a manual.** One line:
   `PencariMovie v3.0.3 is available (this install is v3.0.2).`, linking to this server's
   dashboard, which carries the how-to. Deleted along with it: "the streams below still

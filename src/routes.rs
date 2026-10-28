@@ -1666,8 +1666,8 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
     // It lands on CATALOGS, not Addon: "configure this addon" means choosing which
     // rows and filters it publishes, which is the Catalogs panel. The Addon panel
     // only carries the address and the token, and nothing there changes what a
-    // client sees. (`#configure` used to mean Addon in the PHP era; the dashboard
-    // still maps that old hash, but a real client never asks for it.)
+    // client sees. The bare `#configure` hash means the same thing in the
+    // dashboard, so an old link and the gear reach the same panel.
     let configure_path = p.trim_end_matches('/');
     if configure_path == "/configure"
         || configure_path == "/config"
@@ -3364,7 +3364,7 @@ async fn build_streams_from_files(
 /// Final assembly, exactly like `backend.php:18206-18244`:
 ///
 /// 1. an empty list is NOT `{"streams":[]}` — it carries ONE tappable card
-///    ("Streams Filtered Out" + `#configure`, or "No Streams Found" + the
+///    ("Streams Filtered Out" + `#catalogs`, or "No Streams Found" + the
 ///    keyword search on THIS origin), so the user has somewhere to go;
 /// 2. the sponsored message is prepended whenever the WordPress version
 ///    endpoint configures one — **even when the list is empty** (PHP: "ALWAYS
@@ -3603,15 +3603,15 @@ fn no_streams_card(
         let detail = if notes.is_empty() {
             "your active filters (Resolution / Codec / Size / Keywords)".to_string()
         } else {
-            format!("your active filters — {}", notes.join("; "))
+            format!("your active filters: {}", notes.join("; "))
         };
         return serde_json::json!({
             "name": "⚠️ Streams Filtered Out",
             "description": format!(
-                "🔍 {} stream(s) found on PencariMovie, but hidden by {}.\n👉 Tap to open settings & adjust filters.",
+                "🔍 {} stream(s) found on PencariMovie, but hidden by {}.\n👉 Tap to open Catalogs and adjust filters.",
                 files_before_filter, detail
             ),
-            "externalUrl": format!("{}/#configure", ctx.base_url.trim_end_matches('/')),
+            "externalUrl": format!("{}/#catalogs", ctx.base_url.trim_end_matches('/')),
         });
     }
     // The keyword comes from the TITLE, falling back to the item id. The link

@@ -23,15 +23,17 @@
 
   // The section is #addon, not #connect: the button that opens it is "AddOn" on
   // the Android app and this is the add-on setup screen, so the old name sent
-  // people looking for a "Connect" tab that no longer exists. #connect and
-  // #configure still resolve here — Telegram bot-setup links are in the wild
-  // (?token=...&#settings) and the add-on modal predates the panel.
+  // people looking for a "Connect" tab that no longer exists. #connect still
+  // resolves here — Telegram bot-setup links are in the wild (?token=...&#settings)
+  // and the add-on modal predates the panel.
+  // #configure is NOT here: it is Stremio's gear, and configuring the addon means
+  // choosing which rows and filters it publishes, so it resolves to Catalogs.
   // #system/catalogs predates Catalogs becoming its own section.
   var LEGACY = {
     '#': 'overview',
     'addon': 'addon',
     'connect': 'addon',
-    'configure': 'addon',
+    'configure': 'catalogs',
     'settings': 'bots',
     'bots': 'bots',
     'catalogs': 'catalogs',
