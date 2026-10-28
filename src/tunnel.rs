@@ -737,7 +737,6 @@ pub async fn kill_pid(pid: i64) {
 /// pid file was lost). Never a blanket `taskkill /IM cloudflared.exe`, so an
 /// unrelated tunnel on the same machine is left alone.
 pub async fn kill_leftovers() {
-    let state = load_state();
     let pid = read_pid();
     if pid > 1 {
         kill_pid(pid).await;
@@ -745,6 +744,7 @@ pub async fn kill_leftovers() {
 
     #[cfg(windows)]
     {
+        let state = load_state();
         let mut ports: Vec<u16> = Vec::new();
         let from_state = st_i64(&state, "metrics_port");
         if from_state > 0 && from_state <= u16::MAX as i64 {

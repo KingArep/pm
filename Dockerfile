@@ -31,6 +31,7 @@ ENV PM_BUILD_VERSION=${PM_BUILD_VERSION}
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY public ./public
+COPY desktop ./desktop
 # NO `--mount=type=cache` HERE. BuildKit cache mounts are the only way to keep the
 # cargo registry and target dir between builds, and they are also the one
 # instruction Heroku's CLASSIC Docker builder cannot parse at all — it stops the
