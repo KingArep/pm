@@ -243,6 +243,22 @@ class PencariMovieApp {
           };
         }
       }
+      // ── Dashboard shell ────────────────────────────────────────────────
+      // On the server dashboard the media app is not rendered and there is no
+      // #settingsGate / #addonModal to open: navigation is tabs. Everything
+      // above this point must keep running (catalog settings, LAN IP, the
+      // version check, the session check, and the ?token= bot-setup flow);
+      // everything below is media-shell boot and gate deep links, which do
+      // not apply. The ?token= result is forwarded so the Bots tab can show it.
+      if (document.body.dataset.pmShell === "dashboard") {
+        if (tokenAddResult) {
+          window.dispatchEvent(new CustomEvent("pm:token-result", {
+            detail: tokenAddResult
+          }));
+        }
+        this._startTunnelWatchdog();
+        return;
+      }
       const initialHash = window.location.hash;
       const legacyEngine = !!(window.NuvioBootGuard && window.NuvioBootGuard.engineTooOld && window.NuvioBootGuard.engineTooOld());
       window.__pmLegacyEngine = legacyEngine;
@@ -1422,6 +1438,16 @@ class PencariMovieApp {
       }
     };
     this._updateAddonModalUrls = updateAddonModalUrls;
+    this.refreshTokenField = refreshTokenField;
+    // The dashboard opens Connect as a tab, with no modal to trigger the work
+    // that openAddonModal() used to do. Without this the manifest URLs went
+    // stale after a tunnel toggle.
+    this.refreshConnectState = () => {
+      updateAddonModalUrls();
+      refreshTokenField();
+      this.loadLanIp().finally(() => updateAddonModalUrls());
+      this.loadTunnelStatus().finally(() => updateAddonModalUrls());
+    };
     updateAddonModalUrls();
     refreshTokenField();
     const openAddonModal = () => {
@@ -1978,7 +2004,15 @@ class PencariMovieApp {
         const value = String(input.value || "").trim();
         if (!value) return;
         yield this.copyToClipboard(value, input);
-        flashCopyBtn(copyBtn);
+        // `flashCopyBtn` never existed in this scope — the sibling helper is
+        // `flashCopyBtn2`, defined inside bindGlobalEvents — so every copy here
+        // threw ReferenceError and the boot guard replaced the whole page with
+        // "Nuvio TV could not start". Flash inline instead.
+        const label = copyBtn.textContent;
+        copyBtn.textContent = "Copied";
+        setTimeout(() => {
+          copyBtn.textContent = label;
+        }, 1400);
       }));
     }
     const changePwBtn = this.$("#changePwBtn");
@@ -5732,28 +5766,15 @@ class PencariMovieApp {
             this.sponsor = null;
           }
         }
-        // An APP SHELL (the Android APK) reports `app_shell: true`: the engine's
-        // WordPress `minimum_version` is a minimum for the PHP ENGINE lineage
-        // (2.7.9), which is always "newer" than the APK's own version (1.0.55), and
-        // the app updates itself from its `apk-server-latest` feed (the banner in
-        // MainActivity.checkForAppUpdate). Neither notice may fire here.
-        const appShell = !!(data && data.app_shell === true);
-        if (data && data.update_needed && !appShell) {
-          // A NOTIFICATION, not a wall: the server no longer refuses requests from
-          // an older build, so show what is available in #settings / #addon.
-          // `canApply: false` — this is the WordPress MINIMUM-version notice, not
-          // a GitHub artifact, so the button opens `update_url` instead of asking
-          // the engine to replace itself.
-          this.renderUpdateNotice({
-            current: this._plainVersion(data.client_version) || this._plainVersion(data.current_version),
-            latest: this._plainVersion(data.minimum_version),
-            url: data.update_url,
-            canApply: false
-          });
-          return null;
-        }
-        // Both desktop builds and Android app shells read their update feed
-        // (/api/update/check resolves desktop releases or apk-server-latest).
+        // ONE update source for every build: `checkDesktopUpdate()` asks
+        // `/api/update/check`, which resolves the GitHub release feed on desktop
+        // and `apk-server-latest` for an Android app shell.
+        //
+        // The WordPress `update_needed` branch that used to sit here is deleted on
+        // purpose. It compared against the plugin's PHP-era `min_version` (2.7.9),
+        // so it reported "no update" while GitHub already had v3.0.3 — and because
+        // it `return`ed early it could also SUPPRESS the real notice. See
+        // AGENTS.md §8b: never wire update state to `/api/version`.
         void this.checkDesktopUpdate();
         return null;
       } catch (e) {

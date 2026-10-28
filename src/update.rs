@@ -23,18 +23,18 @@ const APK_VERSION_JSON: &str =
 const APK_RELEASES_URL: &str =
     "https://github.com/aiskendi/pencarimovie-server/releases/tag/apk-server-latest";
 
-/// `linux-x86_64`, `windows-x86_64`, `macos-aarch64` — the artifact suffix the
-/// release workflow publishes. `None` on a platform we do not build for.
 /// The public release page, for the places that can only LINK to an update
-/// (the streams-list notice, a container, a bare build).
+/// (a container, a bare build, the dashboard card).
 pub fn releases_url() -> String {
     format!("https://github.com/{REPO}/releases/latest")
 }
 
-pub fn apk_releases_url() -> String {
-    APK_RELEASES_URL.to_string()
-}
+// `apk_releases_url()` is gone: the streams-list notice now links to this
+// server's dashboard, and the dashboard card reads `releases_url` from the check
+// payload, so nothing called it any more.
 
+/// `linux-x86_64`, `windows-x86_64`, `macos-aarch64` — the artifact suffix the
+/// release workflow publishes. `None` on a platform we do not build for.
 pub fn platform_key() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some("linux-x86_64"),
@@ -229,7 +229,35 @@ pub async fn check() -> Value {
     };
 
     if let Some(hit) = crate::cache::get("update", cache_key) {
-        return (*hit).clone();
+        let mut v = (*hit).clone();
+        // The FEED answer (latest tag, asset name, notes link) is worth caching for
+        // an hour. Whether THIS host may replace itself is not: it depends on the
+        // filesystem right now — is `apply-update.bat`/`.sh` next to the binary, is
+        // there a container marker. Cached, a freshly extracted release kept
+        // answering `no_script` for an hour (measured: script copied in, `/api/
+        // update/check` still said `can_apply:false`), and a deleted script kept
+        // offering a button that could not work. Recomputed on the way out, exactly
+        // like the process-specific fields in `routes::check_version`.
+        if let Some(obj) = v.as_object_mut() {
+            let app_managed = obj.get("app_managed").and_then(|x| x.as_bool()) == Some(true);
+            if !app_managed && obj.contains_key("asset") {
+                let asset = obj
+                    .get("asset")
+                    .and_then(|a| a.as_str())
+                    .map(|s| s.to_string());
+                let reason = apply_blocked_reason(asset.as_deref());
+                obj.insert("can_apply".to_string(), serde_json::json!(reason.is_empty()));
+                obj.insert(
+                    "apply_blocked_reason".to_string(),
+                    serde_json::json!(reason),
+                );
+                obj.insert(
+                    "apply_hint".to_string(),
+                    serde_json::json!(if reason == "container" { CONTAINER_HINT } else { "" }),
+                );
+            }
+        }
+        return v;
     }
 
     if is_android {

@@ -1,0 +1,1224 @@
+/* hallmark · theme: titanium · genre: modern-minimal · job: server-dashboard · axes: dark-monochrome, flat-navigation */
+/* critique: Server control panel for the PencariMovie engine. Navigation carries objects; sub-tabs carry views of one object. No modal surfaces except the credential wall. */
+
+:root {
+  --pm-bg-canvas: #0b0c10;
+  --pm-bg-surface: #13161f;
+  --pm-bg-surface-elevated: #1a1e2b;
+  --pm-bg-surface-hover: #222738;
+  --pm-bg-subtle: rgba(255, 255, 255, 0.04);
+
+  --pm-border-subtle: rgba(255, 255, 255, 0.08);
+  --pm-border-strong: rgba(255, 255, 255, 0.16);
+  --pm-border-focus: #e2e8f0;
+
+  --pm-text-primary: #f8fafc;
+  --pm-text-secondary: #94a3b8;
+  --pm-text-muted: #64748b;
+  --pm-text-inverse: #0b0c10;
+
+  --pm-accent: #e2e8f0;
+  --pm-accent-hover: #ffffff;
+  --pm-accent-surface: rgba(226, 232, 240, 0.08);
+
+  --pm-status-online: #10b981;
+  --pm-status-online-bg: rgba(16, 185, 129, 0.12);
+  --pm-status-warn: #f59e0b;
+  --pm-status-warn-bg: rgba(245, 158, 11, 0.12);
+  --pm-status-danger: #ef4444;
+  --pm-status-danger-bg: rgba(239, 68, 68, 0.12);
+  --pm-status-danger-border: rgba(239, 68, 68, 0.45);
+
+  --pm-font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --pm-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --pm-radius-sm: 6px;
+  --pm-radius-md: 10px;
+  --pm-radius-lg: 14px;
+  --pm-radius-full: 9999px;
+
+  --pm-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --pm-shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+/* ── Base ──────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  overflow-x: clip;
+  background-color: var(--pm-bg-canvas);
+  color: var(--pm-text-primary);
+  font-family: var(--pm-font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100%;
+}
+
+body[data-pm-shell='dashboard'] {
+  margin: 0;
+  padding: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+code {
+  font-family: var(--pm-font-mono);
+  font-size: 0.85em;
+  color: var(--pm-text-primary);
+  background: var(--pm-bg-subtle);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--pm-border-focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+/* ── Shell ─────────────────────────────────────────────────────── */
+.pm-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.pm-container {
+  width: 100%;
+  max-width: 940px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+/* ── Header (status strip, always visible) ─────────────────────── */
+.pm-header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: rgba(11, 12, 16, 0.92);
+  border-bottom: 1px solid var(--pm-border-subtle);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.pm-header__inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.pm-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pm-brand__logo {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--pm-radius-sm);
+  display: block;
+  flex: 0 0 auto;
+}
+
+.pm-brand__title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pm-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pm-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--pm-radius-full);
+  border: 1px solid var(--pm-border-subtle);
+  background: var(--pm-bg-subtle);
+  font-size: 0.74rem;
+  font-weight: 500;
+  color: var(--pm-text-secondary);
+  white-space: nowrap;
+}
+
+.pm-pill--live {
+  color: var(--pm-status-online);
+  background: var(--pm-status-online-bg);
+  border-color: rgba(16, 185, 129, 0.25);
+}
+
+.pm-pill--live.is-down {
+  color: var(--pm-status-danger);
+  background: var(--pm-status-danger-bg);
+  border-color: rgba(239, 68, 68, 0.25);
+}
+
+.pm-pill--muted {
+  /* `--pm-text-muted` (#64748b) measures 4.16:1 on the page background, which
+     fails AA for the normal-size 0.72rem text these pills carry. Secondary is
+     6.48:1 against a card and 7.4:1 against the page. */
+  color: var(--pm-text-secondary);
+  font-family: var(--pm-font-mono);
+  font-size: 0.72rem;
+}
+
+/* The update pill is a button, so it needs a pointer and a pressed state. */
+button.pm-pill {
+  cursor: pointer;
+}
+
+button.pm-pill:active {
+  border-color: var(--pm-status-warn);
+}
+
+/* ── Update popover ────────────────────────────────────────────── */
+/* Anchored to the status row, so the header row must be the containing block. */
+.pm-header__inner {
+  position: relative;
+}
+
+.pm-update-card {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 60;
+  width: min(330px, calc(100vw - 32px));
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: 12px;
+  background: var(--pm-bg-surface-elevated);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
+  text-align: left;
+}
+
+.pm-update-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.86rem;
+}
+
+.pm-update-card__close {
+  padding: 2px 6px;
+  border: 0;
+  background: none;
+  /* Secondary, not muted: the close target is the way out of the card, and
+     #64748b only reaches 3.49:1 on the card surface. */
+  color: var(--pm-text-secondary);
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pm-update-card__close:hover {
+  color: var(--pm-text-primary);
+}
+
+.pm-update-card__body {
+  margin: 8px 0 0;
+  color: var(--pm-text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.pm-update-card__cmd {
+  display: block;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--pm-bg-subtle);
+  color: inherit;
+  font-family: var(--pm-font-mono);
+  font-size: 0.72rem;
+  overflow-x: auto;
+}
+
+.pm-update-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.pm-update-card__msg {
+  margin: 8px 0 0;
+  color: var(--pm-status-warn);
+  font-size: 0.75rem;
+}
+
+/* An update is offered, never forced: one amber pill in the header. */
+.pm-pill--warn {
+  color: var(--pm-status-warn);
+  background: var(--pm-status-warn-bg);
+  border-color: rgba(245, 158, 11, 0.3);
+  text-decoration: none;
+}
+
+.pm-pill--warn:hover {
+  border-color: var(--pm-status-warn);
+}
+
+.pm-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+
+/* A pill with nothing in it is a defect, not a placeholder. */
+.pm-pill:empty,
+.settings-gate__version-badge:empty,
+.pm-copied:empty {
+  display: none;
+}
+
+/* ── Primary navigation (object level) ─────────────────────────── */
+.pm-nav {
+  border-top: 1px solid var(--pm-border-subtle);
+}
+
+.pm-nav__inner {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.pm-nav__inner::-webkit-scrollbar {
+  display: none;
+}
+
+.pm-nav__item {
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+  min-height: 44px;
+  padding: 0 14px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--pm-text-secondary);
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+
+.pm-nav__item:hover {
+  color: var(--pm-text-primary);
+}
+
+.pm-nav__item[aria-current='true'] {
+  color: var(--pm-text-primary);
+  border-bottom-color: var(--pm-accent);
+  font-weight: 600;
+}
+
+/* ── Main / panels ─────────────────────────────────────────────── */
+.pm-main {
+  flex: 1;
+  padding: 28px 0 56px;
+}
+
+.pm-panel > .pm-h2:first-child {
+  margin-top: 0;
+}
+
+.pm-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.pm-panel__head .pm-h2 {
+  margin: 0;
+}
+
+/* ── Typography ────────────────────────────────────────────────── */
+.pm-h1 {
+  font-size: 1.45rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0 0 8px;
+}
+
+.pm-h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 8px;
+}
+
+.pm-h3 {
+  font-size: 0.92rem;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+.pm-lede {
+  font-size: 0.9rem;
+  color: var(--pm-text-secondary);
+  line-height: 1.5;
+  max-width: 62ch;
+  margin: 0 0 18px;
+}
+
+.pm-hint {
+  font-size: 0.8rem;
+  color: var(--pm-text-muted);
+  line-height: 1.45;
+  margin: 0 0 12px;
+}
+
+/* ── Launch block (Overview) ───────────────────────────────────── */
+.pm-launch {
+  padding-bottom: 24px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--pm-border-subtle);
+}
+
+.pm-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ── Cards ─────────────────────────────────────────────────────── */
+.pm-card {
+  background: var(--pm-bg-surface);
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-lg);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.pm-card--inset {
+  background: var(--pm-bg-surface-elevated);
+  border-radius: var(--pm-radius-md);
+  padding: 16px;
+}
+
+/* ── Buttons ───────────────────────────────────────────────────── */
+.pm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 16px;
+  font-size: 0.86rem;
+  font-weight: 500;
+  border-radius: var(--pm-radius-md);
+  border: 1px solid var(--pm-border-subtle);
+  background: var(--pm-bg-surface-elevated);
+  color: var(--pm-text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.pm-btn:hover {
+  background: var(--pm-bg-surface-hover);
+  border-color: var(--pm-border-strong);
+}
+
+.pm-btn--primary {
+  background: var(--pm-accent);
+  border-color: var(--pm-accent);
+  color: var(--pm-text-inverse);
+  font-weight: 600;
+}
+
+.pm-btn--primary:hover {
+  background: var(--pm-accent-hover);
+  border-color: var(--pm-accent-hover);
+}
+
+.pm-btn--sm {
+  min-height: 32px;
+  padding: 4px 12px;
+  font-size: 0.78rem;
+  border-radius: var(--pm-radius-sm);
+}
+
+/* ── Inputs ────────────────────────────────────────────────────── */
+.pm-input {
+  width: 100%;
+  min-width: 0;
+  background: var(--pm-bg-surface-elevated);
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-md);
+  padding: 9px 12px;
+  color: var(--pm-text-primary);
+  font-size: 0.86rem;
+}
+
+.pm-input:focus {
+  border-color: var(--pm-border-focus);
+}
+
+.pm-mono {
+  font-family: var(--pm-font-mono);
+  font-size: 0.8rem;
+}
+
+.pm-copied {
+  font-size: 0.78rem;
+  color: var(--pm-status-online);
+}
+
+/* ── Setup checklist ───────────────────────────────────────────── */
+.pm-checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pm-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--pm-border-subtle);
+  font-size: 0.86rem;
+}
+
+.pm-check:last-child {
+  border-bottom: none;
+}
+
+.pm-check__mark {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 1px solid var(--pm-border-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.66rem;
+  color: transparent;
+}
+
+.pm-check--ok .pm-check__mark {
+  border-color: rgba(16, 185, 129, 0.5);
+  background: var(--pm-status-online-bg);
+  color: var(--pm-status-online);
+}
+
+.pm-check__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pm-check__hint {
+  display: block;
+  font-size: 0.76rem;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--pm-text-muted);
+  margin-top: 2px;
+}
+
+/* An optional step: shown and actionable, but it never counts as unfinished
+   and never blocks "all set". */
+.pm-check--optional .pm-check__text {
+  color: var(--pm-text-secondary);
+}
+
+.pm-check--ok .pm-check__text {
+  color: var(--pm-text-muted);
+}
+
+/* A checklist row that is not merely unfinished but unsafe: the password is
+   still the built-in default. It reads as a warning, not a to-do. */
+.pm-check--danger .pm-check__mark {
+  border-color: var(--pm-status-danger-border);
+  background: var(--pm-status-danger-bg);
+  color: var(--pm-status-danger);
+  font-weight: 700;
+}
+
+.pm-check--danger .pm-check__text {
+  color: var(--pm-status-danger);
+  font-weight: 500;
+}
+
+.pm-check .pm-btn {
+  flex: 0 0 auto;
+}
+
+.pm-done {
+  font-size: 0.86rem;
+  color: var(--pm-status-online);
+  margin: 0;
+}
+
+/* ── Disclosure (shared access token) ──────────────────────────── */
+.pm-details {
+  background: var(--pm-bg-surface);
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-lg);
+  padding: 4px 20px;
+  margin-bottom: 18px;
+}
+
+.pm-details__summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.pm-details__summary::-webkit-details-marker {
+  display: none;
+}
+
+.pm-details__summary::before {
+  content: '+';
+  width: 16px;
+  color: var(--pm-text-muted);
+  font-family: var(--pm-font-mono);
+}
+
+.pm-details[open] .pm-details__summary::before {
+  content: '−';
+}
+
+.pm-details > *:last-child {
+  margin-bottom: 16px;
+}
+
+/* ── Legacy token remap ────────────────────────────────────────── */
+/* The relocated control markup still references the old theme's token from a
+   few shared rules in styles.css. Re-pointing it once, here, kills the
+   inherited amber everywhere instead of chasing each usage. */
+body[data-pm-shell='dashboard'] {
+  --accent: var(--pm-accent);
+  --accent-hover: var(--pm-accent-hover);
+  --text-primary: var(--pm-text-primary);
+  --text-secondary: var(--pm-text-secondary);
+  --text-muted: var(--pm-text-muted);
+}
+
+/* ── Footer ────────────────────────────────────────────────────── */
+.pm-footer {
+  border-top: 1px solid var(--pm-border-subtle);
+  padding: 22px 0;
+  font-size: 0.78rem;
+  color: var(--pm-text-muted);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Relocated control markup, retuned for an in-canvas panel.
+   The wrappers below are carried verbatim from the old overlay, so the
+   classes stay; only their surface treatment changes.
+   ══════════════════════════════════════════════════════════════════ */
+
+.settings-gate__field {
+  margin-bottom: 16px;
+  text-align: left;
+  padding: 14px 16px;
+  background: var(--pm-bg-surface);
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-md);
+}
+
+.settings-gate__field:last-child {
+  margin-bottom: 0;
+}
+
+.settings-gate__label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--pm-text-secondary);
+  margin-bottom: 6px;
+}
+
+.settings-gate__desc {
+  font-size: 0.86rem;
+  color: var(--pm-text-secondary);
+  line-height: 1.45;
+  margin-bottom: 14px;
+}
+
+.settings-gate__version-badge {
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: var(--pm-radius-full);
+  background: var(--pm-bg-subtle);
+  border: 1px solid var(--pm-border-subtle);
+  color: var(--pm-text-secondary);
+}
+
+.settings-gate__input {
+  width: 100%;
+  background: var(--pm-bg-surface-elevated);
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-md);
+  padding: 9px 12px;
+  color: var(--pm-text-primary);
+  font-size: 0.86rem;
+  box-sizing: border-box;
+}
+
+.settings-gate__input:focus {
+  border-color: var(--pm-border-focus);
+}
+
+.settings-gate__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 8px 14px;
+  font-size: 0.84rem;
+  font-weight: 500;
+  border-radius: var(--pm-radius-md);
+  border: 1px solid var(--pm-border-subtle);
+  background: var(--pm-bg-surface-elevated);
+  color: var(--pm-text-primary);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.settings-gate__btn:hover {
+  background: var(--pm-bg-surface-hover);
+  border-color: var(--pm-border-strong);
+}
+
+.settings-gate__btn--danger {
+  background: var(--pm-status-danger-bg);
+  color: var(--pm-status-danger);
+  border-color: rgba(239, 68, 68, 0.25);
+}
+
+.settings-gate__btn--danger:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+.settings-gate__status {
+  font-size: 0.82rem;
+  margin-top: 8px;
+  color: var(--pm-text-secondary);
+}
+
+.settings-gate__status.ok {
+  color: var(--pm-status-online);
+}
+
+.settings-gate__status.error,
+.settings-gate__status.err {
+  color: var(--pm-status-danger);
+}
+
+.settings-gate__link {
+  color: var(--pm-accent);
+  font-size: 0.84rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  padding: 0;
+}
+
+.settings-gate__hint {
+  font-size: 0.8rem;
+  color: var(--pm-text-muted);
+  margin-top: 10px;
+}
+
+.settings-gate__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* Bot pool */
+.settings-gate__bots-container {
+  margin: 18px 0 0;
+  text-align: left;
+  padding: 14px 16px;
+  background: var(--pm-bg-surface);
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-md);
+}
+
+.settings-gate__bots-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.settings-gate__bots-title {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--pm-text-primary);
+}
+
+.settings-gate__bots-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.settings-gate__bot-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--pm-bg-surface-elevated);
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-md);
+  font-size: 0.84rem;
+}
+
+/* Add-on boxes: token, password, tunnel */
+.settings-gate__addon-box {
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--pm-bg-surface);
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-md);
+  text-align: left;
+}
+
+.settings-gate__addon-box > span:first-child {
+  display: block;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--pm-text-primary);
+  margin-bottom: 6px;
+}
+
+.settings-gate__tunnel-desc {
+  font-size: 0.8rem;
+  color: var(--pm-text-secondary);
+  line-height: 1.45;
+  margin-bottom: 8px;
+}
+
+.settings-gate__tunnel-status {
+  font-size: 0.84rem;
+  font-weight: 500;
+  margin: 10px 0;
+  color: var(--pm-text-secondary);
+}
+
+.settings-gate__tunnel-url-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.settings-gate__tunnel-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* Catalog controls */
+.addon-catalog-card {
+  background: var(--pm-bg-surface);
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-lg);
+  padding: 18px;
+  margin-bottom: 16px;
+  text-align: left;
+}
+
+.addon-catalog-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.addon-catalog-card__title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--pm-text-primary);
+}
+
+.addon-catalog-card__badge {
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: var(--pm-radius-full);
+  background: var(--pm-status-online-bg);
+  color: var(--pm-status-online);
+}
+
+.addon-catalog-pill-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.addon-catalog-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 0.78rem;
+  background: var(--pm-bg-surface-elevated);
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-sm);
+  cursor: pointer;
+  color: var(--pm-text-secondary);
+}
+
+.addon-catalog-pill input:checked + span {
+  color: var(--pm-text-primary);
+  font-weight: 500;
+}
+
+.addon-mode-toggle {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.addon-mode-toggle__option {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-md);
+  background: var(--pm-bg-surface-elevated);
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+
+.addon-mode-toggle__option input:checked ~ span {
+  color: var(--pm-text-primary);
+  font-weight: 600;
+}
+
+.addon-stremio-sync {
+  text-align: left;
+}
+
+.addon-stremio-sync__title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.addon-stremio-sync__desc {
+  font-size: 0.82rem;
+  color: var(--pm-text-secondary);
+  line-height: 1.45;
+  margin-bottom: 12px;
+}
+
+.addon-stremio-sync__url {
+  font-family: var(--pm-font-mono);
+  font-size: 0.76rem;
+  padding: 8px 10px;
+  background: var(--pm-bg-canvas);
+  border: 1px solid var(--pm-border-subtle);
+  border-radius: var(--pm-radius-sm);
+  word-break: break-all;
+  margin-bottom: 12px;
+  color: var(--pm-text-secondary);
+}
+
+.addon-stremio-sync__hint {
+  font-size: 0.74rem;
+  color: var(--pm-text-muted);
+  margin-top: 6px;
+}
+
+.addon-stremio-sync__btn {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.addon-catalog-save-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.addon-catalog-status-msg {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--pm-text-secondary);
+  margin-top: 8px;
+}
+
+/* The Nuvio step list is carried verbatim; its inline colours are
+   overridden so it reads as body copy, not a dark inset. */
+#addonNuvioInstructions {
+  background: var(--pm-bg-surface) !important;
+  border: 1px solid var(--pm-border-subtle) !important;
+  border-radius: var(--pm-radius-md) !important;
+  padding: 16px !important;
+}
+
+#addonNuvioInstructions ol {
+  color: var(--pm-text-secondary) !important;
+}
+
+#addonNuvioInstructions li {
+  margin-bottom: 6px;
+}
+
+/* ── Beat the inline oranges app.js writes into the manifest fields ── */
+#addonManifestInput,
+#addonManifestLanInput,
+#addonManifestTunnelInput,
+#addonManifestEclipseInput {
+  color: var(--pm-text-primary) !important;
+}
+
+#addonLocalFieldBadge {
+  color: var(--pm-text-secondary) !important;
+  background: var(--pm-bg-subtle) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   De-amber. styles.css hard-codes #ff6b35 and rgba(255,107,53,…) with
+   !important on the focus and checked states of the catalog controls. Those
+   are literals, so no token remap reaches them; they are re-declared here,
+   last in cascade, on the dashboard only.
+   ══════════════════════════════════════════════════════════════════ */
+body[data-pm-shell='dashboard'] .addon-catalog-mode-opt:focus-within,
+body[data-pm-shell='dashboard'] .addon-mode-toggle__option:focus-within,
+body[data-pm-shell='dashboard'] .addon-catalog-item:focus-within,
+body[data-pm-shell='dashboard'] .bot-pool-item:focus-within {
+  border-color: var(--pm-border-focus) !important;
+  background: var(--pm-bg-surface-hover) !important;
+  outline: 2px solid var(--pm-border-focus) !important;
+  outline-offset: 2px !important;
+  box-shadow: none !important;
+  color: var(--pm-text-primary) !important;
+}
+
+body[data-pm-shell='dashboard'] #upstreamEnabledToggle:focus-visible,
+body[data-pm-shell='dashboard'] .addon-country-select:focus,
+body[data-pm-shell='dashboard'] .addon-catalog-link-btn:focus,
+body[data-pm-shell='dashboard'] .settings-gate__addon-link:focus,
+body[data-pm-shell='dashboard'] .bot-pool-item__remove-btn:focus,
+body[data-pm-shell='dashboard'] .settings-gate__summary:focus {
+  outline: 2px solid var(--pm-border-focus) !important;
+  outline-offset: 2px !important;
+  box-shadow: none !important;
+  color: var(--pm-text-primary) !important;
+  border-color: var(--pm-border-focus) !important;
+}
+
+body[data-pm-shell='dashboard'] .addon-catalog-mode-opt:has(input:checked),
+body[data-pm-shell='dashboard'] .addon-mode-toggle__option:has(input:checked),
+body[data-pm-shell='dashboard'] .addon-catalog-item:has(input:checked) {
+  border-color: var(--pm-border-strong) !important;
+  background: var(--pm-bg-surface-hover) !important;
+  color: var(--pm-text-primary) !important;
+}
+
+body[data-pm-shell='dashboard'] .settings-gate__input:focus {
+  border-color: var(--pm-border-focus) !important;
+  box-shadow: none !important;
+}
+
+body[data-pm-shell='dashboard'] .settings-gate__desc a,
+body[data-pm-shell='dashboard'] .settings-gate__addon-link,
+body[data-pm-shell='dashboard'] .addon-catalog-link-btn {
+  color: var(--pm-accent) !important;
+}
+
+body[data-pm-shell='dashboard'] .addon-catalog-card__frozen-notice,
+body[data-pm-shell='dashboard'] .addon-catalog-frozen-notice {
+  background: var(--pm-bg-subtle) !important;
+  border-color: var(--pm-border-subtle) !important;
+  color: var(--pm-text-secondary) !important;
+}
+
+/* Inline fills that used to be amber now carry the Titanium accent, which is
+   light — so their old white text has to invert or it disappears. */
+body[data-pm-shell='dashboard'] #addonStremioDirectBtn,
+body[data-pm-shell='dashboard'] #copyAddonManifestEclipseBtn {
+  background: var(--pm-accent) !important;
+  border: 1px solid var(--pm-accent) !important;
+  color: var(--pm-text-inverse) !important;
+  font-weight: 600;
+}
+
+body[data-pm-shell='dashboard'] #addonStremioDirectBtn:hover,
+body[data-pm-shell='dashboard'] #copyAddonManifestEclipseBtn:hover {
+  background: var(--pm-accent-hover) !important;
+  border-color: var(--pm-accent-hover) !important;
+}
+
+/* Rest-state amber in styles.css: the catalog badge, its All/None links, the
+   tunnel URL field and the trycloudflare code all hard-code #ff8a5b. */
+body[data-pm-shell='dashboard'] .addon-catalog-card__badge {
+  color: var(--pm-status-online) !important;
+}
+
+body[data-pm-shell='dashboard'] .addon-catalog-card__badge.disabled {
+  color: var(--pm-text-muted) !important;
+}
+
+body[data-pm-shell='dashboard'] .addon-catalog-link-btn {
+  color: var(--pm-text-secondary) !important;
+  text-decoration-color: var(--pm-border-strong);
+}
+
+body[data-pm-shell='dashboard'] .addon-catalog-link-btn:hover {
+  color: var(--pm-text-primary) !important;
+}
+
+body[data-pm-shell='dashboard'] .settings-gate__tunnel-desc code,
+body[data-pm-shell='dashboard'] .settings-gate__tunnel-url-row .settings-gate__input {
+  color: var(--pm-text-primary) !important;
+}
+
+body[data-pm-shell='dashboard'] .settings-gate__tunnel-status {
+  color: var(--pm-text-secondary) !important;
+}
+
+body[data-pm-shell='dashboard'] .settings-gate__tunnel-status.is-on {
+  color: var(--pm-status-online) !important;
+}
+
+body[data-pm-shell='dashboard'] .settings-gate__tunnel-status.is-busy {
+  color: var(--pm-status-warn) !important;
+}
+
+body[data-pm-shell='dashboard'] .settings-gate__tunnel-status.is-error {
+  color: var(--pm-status-danger) !important;
+}
+
+/* An empty status line is a gap, not a message. */
+.settings-gate__status:empty {
+  display: none;
+}
+
+/* ── Mobile ────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .pm-container {
+    padding: 0 14px;
+  }
+
+  .pm-header__inner {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .pm-status {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .pm-main {
+    padding: 20px 0 40px;
+  }
+
+  .pm-h1 {
+    font-size: 1.25rem;
+  }
+
+  .pm-card,
+  .addon-catalog-card,
+  .settings-gate__field,
+  .settings-gate__addon-box,
+  .settings-gate__bots-container {
+    padding: 14px;
+  }
+
+  .pm-details {
+    padding: 2px 14px;
+  }
+
+  .pm-btn {
+    min-height: 44px;
+  }
+
+  .pm-btn--sm {
+    min-height: 36px;
+  }
+
+  .settings-gate__tunnel-url-row {
+    flex-wrap: wrap;
+  }
+
+  .settings-gate__tunnel-url-row > .settings-gate__btn {
+    width: 100%;
+  }
+}

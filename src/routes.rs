@@ -249,6 +249,11 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
                 "enabled": auth_enabled(),
                 "authenticated": is_authenticated(&ctx),
                 "token": if auth_privileged(&ctx) { auth_token() } else { String::new() },
+                // Only to a caller that already got past the gate: telling an
+                // anonymous visitor "the password is still 123456" is a map to
+                // the front door, so the flag is blank unless privileged.
+                "default_password": auth_privileged(&ctx)
+                    && crate::auth::auth_uses_default_password(),
             }),
         );
     }
@@ -1652,8 +1657,24 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
     }
 
     /* ── root / configure / static / unknown ──────────────────────────────── */
-    if p == "/configure" {
-        return redirect("/#addon");
+    // Stremio's gear icon (manifest `behaviorHints.configurable: true`) opens
+    // `<transportUrl>/configure`, and the transport URL IS the manifest — so the
+    // request that arrives is `/…/manifest.json/configure`. Only the bare
+    // `/configure` was routed, so in a client the gear was a 404 (measured:
+    // `GET /<token>/manifest.json/configure` → 404, while `/configure` → 200).
+    //
+    // It lands on CATALOGS, not Addon: "configure this addon" means choosing which
+    // rows and filters it publishes, which is the Catalogs panel. The Addon panel
+    // only carries the address and the token, and nothing there changes what a
+    // client sees. (`#configure` used to mean Addon in the PHP era; the dashboard
+    // still maps that old hash, but a real client never asks for it.)
+    let configure_path = p.trim_end_matches('/');
+    if configure_path == "/configure"
+        || configure_path == "/config"
+        || configure_path == "/manifest.json/configure"
+        || configure_path == "/manifest.json/config"
+    {
+        return redirect("/#catalogs");
     }
     // Everything below `/api/*`, `/manifest.json`, `/catalog|meta|stream|
     // subtitles|eclipse` has already been answered above, so anything left is
@@ -1788,13 +1809,10 @@ async fn handle_stream(state: &Arc<AppState>, ctx: &ReqCtx, item_type: &str, ite
                 "stremio stream served from cache",
                 &serde_json::json!({"type": item_type, "id": item_id}),
             );
-            // The cached body is the LIST only; the sponsor is re-fetched per
-            // answer, so a warm list can never serve a missing sponsor.
-            let below = hit
-                .get("had_streams")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let streams = decorate_streams(&ctx.base_url, list.clone(), below).await;
+            // The cached body is the LIST only; the sponsor and the update notice
+            // are re-fetched per answer, so a warm list can never serve a missing
+            // sponsor or a stale "update available" card.
+            let streams = decorate_streams(&ctx.base_url, list.clone()).await;
             return stremio_json(200, &serde_json::json!({"streams": streams}), "no-store");
         }
     }
@@ -3412,11 +3430,11 @@ fn with_top_items(
 ///
 /// Both come from their own caches (300 s / 600 s), so this is a map lookup on
 /// the hot path; neither is ever stored in the `/stream` response cache.
-async fn decorate_streams(base_url: &str, streams: Vec<Value>, streams_below: bool) -> Vec<Value> {
-    // The WordPress minimum-version notice as a NON-BLOCKING item: the PHP
-    // returned this card INSTEAD of the streams, which made an outdated engine
-    // unusable. Placed below the sponsor item (if any), above media streams.
-    let notice = update_notice(streams_below, base_url).await;
+async fn decorate_streams(base_url: &str, streams: Vec<Value>) -> Vec<Value> {
+    // The update notice as a NON-BLOCKING item: the PHP returned this card INSTEAD
+    // of the streams, which made an outdated engine unusable. Placed below the
+    // sponsor item (if any), above media streams.
+    let notice = update_notice(base_url).await;
     let sponsor = sponsor_item().await;
     with_top_items(streams, notice, sponsor)
 }
@@ -3424,7 +3442,7 @@ async fn decorate_streams(base_url: &str, streams: Vec<Value>, streams_below: bo
 /// A stream answer whose list is ONE card (no Telegram session yet, a file that
 /// could not be resolved, ...): the card keeps its place BELOW the sponsor.
 async fn single_card_streams(base_url: &str, card: Value) -> Response {
-    let streams = decorate_streams(base_url, vec![card], false).await;
+    let streams = decorate_streams(base_url, vec![card]).await;
     stremio_json(200, &serde_json::json!({"streams": streams}), "no-store")
 }
 
@@ -3437,41 +3455,37 @@ async fn finish_streams(
     filtered: bool,
     files_before_filter: usize,
 ) -> Response {
-    // Captured BEFORE the placeholder is pushed: the notice must only promise
-    // "the streams below still work" when there really are streams below it.
-    let had_streams = !streams.is_empty();
     if streams.is_empty() {
         streams.push(no_streams_card(ctx, title, item_id, filtered, files_before_filter));
     }
     // The cache holds the LIST ONLY. Baking the sponsor (and the update notice)
     // into the cached body meant one failed WordPress call hid the sponsor from
     // every client for the next [`STREAM_CACHE_TTL`] seconds, and froze an
-    // "update available" card long after the update — both intermittent
-    // "the sponsor is not on top" reports. `had_streams` travels with the list so
-    // a cache HIT can still word the update notice correctly.
+    // "update available" card long after the update, both intermittent
+    // "the sponsor is not on top" reports.
     crate::cache::put(
         "stream",
         &stream_cache_key(item_type, item_id, &ctx.base_url),
-        &serde_json::json!({"streams": &streams, "had_streams": had_streams}),
+        &serde_json::json!({"streams": &streams}),
         STREAM_CACHE_TTL,
         0,
     );
-    let streams = decorate_streams(&ctx.base_url, streams, had_streams).await;
+    let streams = decorate_streams(&ctx.base_url, streams).await;
     stremio_json(200, &serde_json::json!({"streams": streams}), "no-store")
 }
 
 /// Build the "update available" item from a `/api/update/check` answer
-/// (same check mechanism as the web #addon / #settings banner).
+/// (the same feed the dashboard header card reads).
 ///
-/// Non-blocking by design: it never replaces the streams. `container` changes the
-/// advice, because a container updates by pulling a new image, not by replacing a
-/// binary. An app shell never reaches here (`update_available` is false for it).
-fn build_update_notice(
-    check: &Value,
-    container: bool,
-    streams_below: bool,
-    base_url: &str,
-) -> Value {
+/// Non-blocking by design: it never replaces the streams, and it only notifies.
+///
+/// The link goes to THIS server's dashboard, not to GitHub. The reader got the
+/// stream from this server, so the dashboard is reachable by definition, and its
+/// header card names the one update path that works on this host: "Update now" for a
+/// binary that can replace itself, `docker compose pull` for a container, the APK for
+/// an app shell, the release page for a manual install. A GitHub link made every host
+/// read the notes and guess which case it was.
+fn build_update_notice(check: &Value, base_url: &str) -> Value {
     let current_raw = check
         .get("current_display")
         .or_else(|| check.get("current"))
@@ -3488,75 +3502,17 @@ fn build_update_notice(
         .unwrap_or("");
     let latest = crate::config::clean_version(latest_raw);
 
-    let explicit_url = check
-        .get("update_url")
-        .or_else(|| check.get("notes_url"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-
-    // Where "the update page" actually is:
-    //   1. In a container, the public releases page next to the pull hint;
-    //   2. On Android (app_managed), the APK release / direct download link;
-    //   3. An explicit custom update url (if non-GitHub);
-    //   4. On a desktop build, THIS server's `#settings`, which carries the update banner
-    //      and one-click "Update now".
-    let (url, hint) = if container {
-        let releases = check
-            .get("releases_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        (
-            if !releases.is_empty() {
-                releases.to_string()
-            } else {
-                crate::update::releases_url()
-            },
-            "run `docker compose pull && docker compose up -d`",
-        )
-    } else if check.get("app_managed").and_then(|v| v.as_bool()) == Some(true) {
-        let target = check
-            .get("releases_url")
-            .or_else(|| check.get("notes_url"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        (
-            if !target.is_empty() {
-                target.to_string()
-            } else {
-                crate::update::apk_releases_url()
-            },
-            "open the update page to install the new APK",
-        )
-    } else if !explicit_url.is_empty() && !explicit_url.contains("github.com") {
-        (explicit_url.to_string(), "open the update page, then restart the server")
-    } else {
-        (
-            format!("{}/#settings", base_url.trim_end_matches('/')),
-            "open Settings on this server and press Update now",
-        )
-    };
-
-    // Only promise the streams below when there ARE streams below — an empty
-    // list still gets the notice (its own card explains the empty result).
-    let tail = if streams_below {
-        " — the streams below still work."
-    } else {
-        "."
-    };
+    // The notice NOTIFIES. One line, one version pair, no instructions: the page
+    // behind the link is where the how-to lives.
     serde_json::json!({
-        "name": "⬆️ Update available",
-        "description": format!(
-            "PencariMovie v{latest} is available (this install: v{current}).\n👉 To update {hint}{tail}",
-        ),
-        "externalUrl": url,
+        "name": "\u{2b06}\u{fe0f} Update available",
+        "description": format!("PencariMovie v{latest} is available (this install is v{current})."),
+        "externalUrl": format!("{}/", base_url.trim_end_matches('/')),
     })
 }
 
-/// `None` unless a newer release is published (same update feed as `#settings` / `#addon`).
-async fn update_notice(streams_below: bool, base_url: &str) -> Option<Value> {
+/// `None` unless a newer release is published (same feed as the header card).
+async fn update_notice(base_url: &str) -> Option<Value> {
     let check = crate::update::check().await;
     let available = check
         .get("update_available")
@@ -3566,14 +3522,7 @@ async fn update_notice(streams_below: bool, base_url: &str) -> Option<Value> {
     if !available {
         return None;
     }
-    let container = check.get("apply_blocked_reason").and_then(|v| v.as_str()) == Some("container")
-        || crate::update::runs_in_container();
-    Some(build_update_notice(
-        &check,
-        container,
-        streams_below,
-        base_url,
-    ))
+    Some(build_update_notice(&check, base_url))
 }
 
 /// Non-default `stream_config` entries that can hide a file, as short phrases.
@@ -8384,44 +8333,49 @@ mod tests {
             "minimum_version": "v2.9.3",
             "update_url": "https://example.test/download",
         });
-        let desktop = build_update_notice(&check, false, true, "http://127.0.0.1:8088");
+        let desktop = build_update_notice(&check, "http://127.0.0.1:8088");
         let desc = desktop["description"].as_str().unwrap();
         assert!(desc.contains("v2.9.3"), "{desc}");
-        // The install version is shown clean — never the git stamp.
+        // The install version is shown clean, never the git stamp.
         assert!(desc.contains("v2.8.8"), "{desc}");
         assert!(!desc.contains("-10-g"), "{desc}");
-        assert_eq!(
-            desktop["externalUrl"],
-            serde_json::json!("https://example.test/download")
-        );
-        // It is a notification: with streams below, say they still work.
-        assert!(desc.contains("still work"), "{desc}");
-        // ... but an EMPTY list must not promise streams that are not there.
-        let empty = build_update_notice(&check, false, false, "http://127.0.0.1:8088");
-        let edesc = empty["description"].as_str().unwrap();
-        assert!(!edesc.contains("still work"), "{edesc}");
-        assert!(edesc.ends_with('.'), "{edesc}");
-        // A container is told to pull the image instead, and links to the
-        // release page (there is no local page that could install an image).
-        let container = build_update_notice(&check, true, true, "http://127.0.0.1:8088");
-        let cdesc = container["description"].as_str().unwrap();
-        assert!(cdesc.contains("docker compose pull"), "{cdesc}");
-        assert!(container["externalUrl"]
-            .as_str()
-            .unwrap()
-            .contains("releases/latest"));
-        // No WordPress update_url on a desktop → THIS server's #settings, which
-        // carries the banner and the one-click "Update now".
-        let no_url = serde_json::json!({"current_version": "2.8.8", "minimum_version": "2.9.3"});
-        let card = build_update_notice(&no_url, false, true, "http://127.0.0.1:8088/");
-        assert_eq!(
-            card["externalUrl"],
-            serde_json::json!("http://127.0.0.1:8088/#settings")
-        );
-        assert!(card["description"]
-            .as_str()
-            .unwrap()
-            .contains("press Update now"));
+        // The link is THIS server even though the payload carries a custom
+        // update_url: the dashboard card names the update path for this host, and
+        // the reader already reached this server to get the stream.
+        let base = serde_json::json!("http://127.0.0.1:8088/");
+        assert_eq!(desktop["externalUrl"], base);
+        // ONE line, one full stop, no instructions. The old text carried "the
+        // streams below still work" (it described the list the reader was looking
+        // at, and needed `streams_below` plumbing through three functions) and then
+        // a per-host "To update, ..." hint. The notice notifies; the page behind the
+        // link explains how.
+        assert_eq!(desc.matches('\n').count(), 0, "{desc}");
+        assert!(desc.ends_with('.'), "{desc}");
+        assert!(!desc.contains("still work"), "{desc}");
+        assert!(!desc.contains("To update"), "{desc}");
+        // Same text AND same destination on every host: the dashboard card decides
+        // what "update" means on this machine.
+        let container = build_update_notice(&check, "http://127.0.0.1:8088");
+        assert_eq!(container["description"].as_str().unwrap(), desc);
+        assert_eq!(container["externalUrl"], base);
+        let self_update = serde_json::json!({
+            "current_display": "2.8.8",
+            "latest_display": "2.9.3",
+            "can_apply": true,
+        });
+        let card = build_update_notice(&self_update, "http://127.0.0.1:8088/");
+        assert_eq!(card["externalUrl"], base);
+        assert_eq!(card["description"].as_str().unwrap(), desc);
+
+        let manual = serde_json::json!({
+            "current_display": "2.8.8",
+            "latest_display": "2.9.3",
+            "can_apply": false,
+            "notes_url": "https://github.com/aiskendi/pencarimovie-server/releases/tag/v2.9.3",
+        });
+        let manual_card = build_update_notice(&manual, "http://127.0.0.1:8088/");
+        assert_eq!(manual_card["externalUrl"], base);
+        assert_eq!(manual_card["description"].as_str().unwrap(), desc);
 
         // Also accepts the /api/update/check feed payload format (like web #settings / #addon)
         let check_feed = serde_json::json!({
@@ -8431,7 +8385,7 @@ mod tests {
             "latest_display": "2.9.0",
             "releases_url": "https://github.com/aiskendi/pencarimovie-server/releases/latest"
         });
-        let desktop_feed = build_update_notice(&check_feed, false, true, "http://127.0.0.1:8088");
+        let desktop_feed = build_update_notice(&check_feed, "http://127.0.0.1:8088");
         let desc_feed = desktop_feed["description"].as_str().unwrap();
         assert!(desc_feed.contains("v2.9.0"), "{desc_feed}");
         assert!(desc_feed.contains("v2.8.8"), "{desc_feed}");
@@ -8445,14 +8399,11 @@ mod tests {
             "latest_display": "1.0.72",
             "releases_url": "https://github.com/aiskendi/pencarimovie-server/releases/download/apk-server-latest/pencarimovie-server_arm64-v8a.apk"
         });
-        let android_card = build_update_notice(&android_feed, false, true, "http://127.0.0.1:8088");
+        let android_card = build_update_notice(&android_feed, "http://127.0.0.1:8088");
         let and_desc = android_card["description"].as_str().unwrap();
         assert!(and_desc.contains("v1.0.72"), "{and_desc}");
         assert!(and_desc.contains("v1.0.71"), "{and_desc}");
-        assert_eq!(
-            android_card["externalUrl"],
-            serde_json::json!("https://github.com/aiskendi/pencarimovie-server/releases/download/apk-server-latest/pencarimovie-server_arm64-v8a.apk")
-        );
+        assert_eq!(android_card["externalUrl"], base);
 
         // Placement: sponsor at [0], update notice at [1], then the media rows.
         // This is `with_top_items()`, the ONE placement every `/stream` answer

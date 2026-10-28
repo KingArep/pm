@@ -1,106 +1,35 @@
 <!doctype html>
-<html lang="en" class="no-flex-gap no-css-grid no-css-math no-backdrop-filter no-aspect-ratio">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+      content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#141414" />
-    <title>PencariMovie — Stream & Download</title>
+    <meta name="theme-color" content="#0b0c10" />
+    <title>PencariMovie Server — Dashboard</title>
     <link rel="icon" type="image/png" href="logo.png?v=20261021b" />
     <link rel="apple-touch-icon" href="logo.png?v=20261021b" />
     <link rel="stylesheet" href="stream-theme.css?v=20261009pm10" />
     <link rel="stylesheet" href="styles.css?v=20261024music2" />
+    <!-- last on purpose: the Titanium tokens must win over the legacy
+         media-shell stylesheets for the relocated settings markup -->
+    <link rel="stylesheet" href="dashboard.css?v=20261028dash24" />
     <link
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
       crossorigin="anonymous"
       referrerpolicy="no-referrer"
     />
-    <link rel="stylesheet" href="css/bundle.css?v=20261009pm10" />
-    <script src="assets/runtime/legacy-features.js?v=20261009pm10"></script>
-    <script>
-      (function configureTizenLaunch() {
-        var root = typeof globalThis !== "undefined" ? globalThis : window;
-        var search = String((window.location && window.location.search) || "").toLowerCase();
-        var userAgent = String(
-          (window.navigator && window.navigator.userAgent) || ""
-        ).toLowerCase();
-        var webapis = root.webapis || {};
-        var isTizenLaunch = Boolean(
-          root.__NUVIO_PLATFORM__ === "tizen" ||
-          root.tizen ||
-          root.avplay ||
-          webapis.avplay ||
-          webapis.avPlay ||
-          webapis.productinfo ||
-          search.indexOf("wrapper=tizen") !== -1 ||
-          userAgent.indexOf("tizen") !== -1
-        );
-
-        if (!isTizenLaunch) {
-          return;
-        }
-
-        root.__NUVIO_PLATFORM__ = "tizen";
-        var viewport = document.querySelector("meta[name='viewport']");
-        if (!viewport) {
-          viewport = document.createElement("meta");
-          viewport.name = "viewport";
-          document.head.appendChild(viewport);
-        }
-        viewport.setAttribute(
-          "content",
-          "width=1920, height=1080, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
-        );
-      })();
-    </script>
+    <script src="assets/runtime/legacy-features.js?v=20261028dash18"></script>
   </head>
-  <body class="stream-dark">
-    <!-- ─── Loading Screen (shown during session check) ───────── -->
-    <div id="loadingScreen" class="loading-screen" aria-hidden="false">
-      <div class="loading-screen__spinner"></div>
-      <p class="loading-screen__text"></p>
-    </div>
-    <script>
-      (function () {
-        try {
-          var sessionRaw = localStorage.getItem("tgfd.session");
-          var legacyBotId = localStorage.getItem("tgfd.botId");
-          var hasSession = false;
-          if (sessionRaw) {
-            var parsed = JSON.parse(sessionRaw);
-            if (parsed && parsed.hasSession && parsed.botId) {
-              hasSession = true;
-            }
-          } else if (legacyBotId) {
-            hasSession = true;
-          }
-          if (!hasSession) return;
-
-          var h = window.location.hash;
-          if (h === "#configure" || h === "#addon") {
-            var ls = document.getElementById("loadingScreen");
-            if (ls) ls.style.display = "none";
-            var am = document.getElementById("addonModal");
-            if (am) {
-              am.classList.remove("hidden");
-              am.setAttribute("aria-hidden", "false");
-            }
-          } else if (h === "#settings") {
-            var ls = document.getElementById("loadingScreen");
-            if (ls) ls.style.display = "none";
-            var sg = document.getElementById("settingsGate");
-            if (sg) {
-              sg.classList.remove("hidden");
-              sg.setAttribute("aria-hidden", "false");
-            }
-          }
-        } catch (e) {}
-      })();
-    </script>
+  <body class="stream-dark" data-pm-shell="dashboard">
+    <!-- No #loadingScreen here on purpose. It was a media-shell overlay whose
+         only exit was showSettingsGate()/hideSettingsGate(), and those return
+         early now that there is no gate — so disconnect left "Provisioning guest
+         bot..." up forever. A control panel must never block itself; every
+         in-flight state has its own status line (bot pool, tunnel, checklist). -->
 
     <!-- ─── Update Required Overlay ──────────────────────────── -->
     <div
@@ -159,24 +88,23 @@
           style="
             margin-top: 16px;
             padding: 12px 14px;
-            background: rgba(255, 255, 255, 0.04);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: var(--pm-bg-subtle);
+            border: 1px solid var(--pm-border-subtle);
             border-radius: 8px;
             font-size: 0.82rem;
-            color: #ccc;
+            color: var(--pm-text-secondary);
             line-height: 1.5;
             text-align: left;
           "
         >
-          PencariMovie Server is completely free &mdash; we never sell access or
-          subscriptions. If this is not your personal server, you can easily run
-          your own for free on any device (Phone, PC, TV, VPS, Cloud) &mdash; get the installer
-          at
+          PencariMovie Server is free. We do not sell access or subscriptions. If this
+          is not your personal server, you can run your own at no cost on any device
+          (phone, PC, TV, VPS, cloud) with the installer from
           <a
             href="https://telegra.my"
             target="_blank"
             rel="noopener"
-            style="color: var(--accent, #ff6b35); font-weight: 600; text-decoration: underline"
+            style="color: var(--accent, var(--pm-accent)); font-weight: 600; text-decoration: underline"
             >telegra.my</a
           >.
         </div>
@@ -190,7 +118,7 @@
             Server owner? Click to enter password
           </summary>
           <div style="margin-top: 14px">
-            <p class="settings-gate__desc" style="margin-bottom: 12px; font-size: 0.82rem; color: #888;">
+            <p class="settings-gate__desc" style="margin-bottom: 12px; font-size: 0.82rem; color: var(--pm-text-muted);">
               Enter server password to continue. (Default: <code>123456</code>)
             </p>
             <div class="settings-gate__field">
@@ -213,24 +141,646 @@
     </div>
 
     <!-- ─── Settings Gate (bot login) ────────────────────────── -->
-    <div id="settingsGate" class="settings-gate hidden" aria-hidden="true">
-      <div class="settings-gate__card">
-        <button
-          id="settingsClose"
-          class="settings-gate__close"
-          aria-label="Close settings"
-        >
-          ✕
-        </button>
 
-        <div id="settingsTokenSection">
-          <div class="settings-gate__header-wrap">
-            <h2 id="settingsTitle" class="settings-gate__title">⚙️ Settings</h2>
-            <span
-              id="settingsVersion"
-              class="settings-gate__version-badge"
-            ></span>
+    <!-- ─── Server Dashboard ────────────────────────────────────── -->
+    <div class="pm-shell" id="pmDashboard">
+      <header class="pm-header">
+        <div class="pm-container pm-header__inner">
+          <div class="pm-brand">
+            <img src="logo.png?v=20261021b" alt="" class="pm-brand__logo" />
+            <span class="pm-brand__title">PencariMovie Server</span>
           </div>
+          <div class="pm-status">
+            <span class="pm-pill pm-pill--live" id="dashOnlineBadge">
+              <span class="pm-dot" aria-hidden="true"></span>
+              <span id="dashOnlineText">Checking</span>
+            </span>
+            <span class="pm-pill pm-pill--muted" id="dashVersion"></span>
+            <!-- Shown only when /api/update/check reports a newer release. A button,
+                 not a link: it opens the card below, which names the update path that
+                 actually works on this host. -->
+            <button
+              type="button"
+              class="pm-pill pm-pill--warn hidden"
+              id="dashUpdatePill"
+              aria-haspopup="dialog"
+              aria-expanded="false"
+              aria-controls="dashUpdateCard"
+            >
+              Update
+            </button>
+            <span class="pm-pill pm-pill--muted" id="dashHostPill"></span>
+          </div>
+          <!-- The popover. Anchored to the status row, closed by \u00d7, Escape or a
+               click outside; it never covers the page it is about. -->
+          <div
+            class="pm-update-card hidden"
+            id="dashUpdateCard"
+            role="dialog"
+            aria-labelledby="dashUpdateTitle"
+          >
+            <div class="pm-update-card__head">
+              <strong id="dashUpdateTitle">Update available</strong>
+              <button
+                type="button"
+                class="pm-update-card__close"
+                id="dashUpdateClose"
+                aria-label="Close update notice"
+              >&times;</button>
+            </div>
+            <p class="pm-update-card__body" id="dashUpdateBody"></p>
+            <code class="pm-update-card__cmd hidden" id="dashUpdateCmd"></code>
+            <div class="pm-update-card__actions">
+              <button type="button" class="pm-btn pm-btn--sm hidden" id="dashUpdateApply">
+                Update now
+              </button>
+              <a class="pm-btn pm-btn--sm" id="dashUpdateLink" href="#" target="_blank" rel="noopener">
+                Release notes
+              </a>
+            </div>
+            <p class="pm-update-card__msg hidden" id="dashUpdateMsg"></p>
+          </div>
+        </div>
+        <nav class="pm-nav" id="pmNav" aria-label="Sections">
+          <div class="pm-container pm-nav__inner">
+            <button type="button" class="pm-nav__item" data-section="overview">Overview</button>
+            <button type="button" class="pm-nav__item" data-section="addon">Addon</button>
+            <button type="button" class="pm-nav__item" data-section="bots">Bots</button>
+            <button type="button" class="pm-nav__item" data-section="tunnel">Tunnel</button>
+            <button type="button" class="pm-nav__item" data-section="catalogs">Catalogs</button>
+            <button type="button" class="pm-nav__item" data-section="system">System</button>
+          </div>
+        </nav>
+      </header>
+
+      <main class="pm-main">
+        <div class="pm-container">
+
+          <!-- ─── Overview ───────────────────────────────────────── -->
+          <section class="pm-panel" id="tab-overview" data-panel="overview">
+            <div class="pm-launch">
+              <h1 class="pm-h1">Nuvio TV Web Player</h1>
+              <p class="pm-lede">
+                Full-screen media browser and video player for the catalogs this server
+                exposes. Opens as its own page, so refreshing never loses your place.
+              </p>
+              <div class="pm-row">
+                <a class="pm-btn pm-btn--primary" href="nuvio.html">Launch web player</a>
+                <a
+              id="settingsSearchWebsiteBtn"
+              class="settings-gate__btn"
+              href="https://pencarimovie.com/search/"
+              target="_blank"
+              rel="noopener"
+              title="Search on pencarimovie.com"
+              style="
+                width: 100%;
+                padding: 10px 14px;
+                font-size: 0.88rem;
+                background: var(--pm-bg-surface-elevated);
+                border: 1px solid var(--pm-border-subtle);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
+                cursor: pointer;
+                text-decoration: none;
+                box-sizing: border-box;
+              "
+            >
+              Search on pencarimovie.com
+            </a>
+              </div>
+            </div>
+
+            <div class="pm-card" id="pmSetupCard">
+              <h2 class="pm-h2">Finish setup</h2>
+              <ul class="pm-checklist" id="pmChecklist"></ul>
+              <p class="pm-done hidden" id="pmChecklistReady">All set. Every step below is done.</p>
+            </div>
+          </section>
+
+          <!-- ─── Addon ──────────────────────────────────────────── -->
+          <section class="pm-panel hidden" id="tab-addon" data-panel="addon">
+            <h2 class="pm-h2">Addon address</h2>
+            <p class="pm-lede">
+              One address works in every Stremio-compatible client: Stremio, Nuvio,
+              Streamr, Debrify, WuPlay, Playtario, ARVIO and Cinaura. The address is
+              built for the network you opened this page from, so it is this machine,
+              your Wi-Fi, or the public tunnel.
+            </p>
+
+            <details class="pm-details">
+              <summary class="pm-details__summary">Access token</summary>
+              <p class="pm-hint">
+                This token is part of every address below. Regenerate it only if it has
+                leaked; every client will then need the new address.
+              </p>
+              <div class="addon-catalog-card" id="addonTokenCard">
+          <div class="addon-catalog-card__header">
+            <span class="addon-catalog-card__title">Access Token</span>
+            <span class="addon-catalog-card__badge" id="addonTokenBadge"
+              >Active</span
+            >
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; width: 100%; box-sizing: border-box;">
+            <input
+              type="text"
+              id="addonTokenInput"
+              class="settings-gate__input"
+              style="font-family: monospace; font-size: 0.82rem; flex: 1 1 0%; min-width: 0; box-sizing: border-box;"
+              readonly
+              value=""
+            />
+            <button
+              type="button"
+              id="addonTokenCopyBtn"
+              class="settings-gate__btn"
+              style="
+                flex: 0 0 auto;
+                white-space: nowrap;
+                padding: 8px 12px;
+                font-size: 0.82rem;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+              "
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              id="addonTokenRotateBtn"
+              class="settings-gate__btn"
+              style="
+                flex: 0 0 auto;
+                white-space: nowrap;
+                padding: 8px 12px;
+                font-size: 0.82rem;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 4px;
+              "
+            >
+              Regenerate
+            </button>
+          </div>
+          <div
+            id="addonTokenStatus"
+            class="addon-catalog-status-msg hidden"
+          ></div>
+        </div>
+            </details>
+
+            <div class="settings-gate__field" id="addonLanField">
+          <div
+            style="
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              margin-bottom: 6px;
+            "
+          >
+            <label
+              class="settings-gate__label"
+              for="addonManifestLanInput"
+              style="margin-bottom: 0"
+            >
+              Wi-Fi / LAN Manifest (TV, Phone, Tablet)
+            </label>
+            <span
+              style="
+                font-size: 0.72rem;
+                background: var(--pm-status-online-bg);
+                color: var(--pm-status-online);
+                padding: 2px 6px;
+                border-radius: 6px;
+                font-weight: 600;
+              "
+              >Remote</span
+            >
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; width: 100%; box-sizing: border-box;">
+            <input
+              type="text"
+              id="addonManifestLanInput"
+              class="settings-gate__input"
+              style="color: var(--pm-status-online); font-family: monospace; font-size: 0.88rem; flex: 1 1 0%; min-width: 0; box-sizing: border-box;"
+              readonly
+              value=""
+            />
+            <button
+              id="copyAddonManifestLanBtn"
+              class="settings-gate__btn"
+              style="
+                flex: 0 0 auto;
+                white-space: nowrap;
+                padding: 0 16px;
+                height: 38px;
+                min-width: 104px;
+                font-size: 0.85rem;
+                border-radius: 8px;
+                box-sizing: border-box;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 4px;
+              "
+            >
+              Copy
+            </button>
+          </div>
+        </div>
+              <div class="settings-gate__field" id="addonLocalField">
+          <div
+            style="
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              margin-bottom: 6px;
+            "
+          >
+            <label
+              class="settings-gate__label"
+              id="addonLocalFieldLabel"
+              for="addonManifestInput"
+              style="margin-bottom: 0"
+            >
+              Localhost Manifest (This Device Only)
+            </label>
+            <span
+              id="addonLocalFieldBadge"
+              style="
+                font-size: 0.72rem;
+                background: var(--pm-border-subtle);
+                color: var(--pm-text-secondary);
+                padding: 2px 6px;
+                border-radius: 6px;
+                font-weight: 600;
+              "
+              >Local</span
+            >
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; width: 100%; box-sizing: border-box;">
+            <input
+              type="text"
+              id="addonManifestInput"
+              class="settings-gate__input"
+              style="color: var(--pm-text-secondary); font-family: monospace; font-size: 0.88rem; flex: 1 1 0%; min-width: 0; box-sizing: border-box;"
+              readonly
+              value=""
+            />
+            <button
+              id="copyAddonManifestBtn"
+              class="settings-gate__btn"
+              style="
+                background: var(--pm-bg-surface-hover);
+                color: var(--pm-text-primary);
+                flex: 0 0 auto;
+                white-space: nowrap;
+                padding: 0 16px;
+                height: 38px;
+                min-width: 104px;
+                font-size: 0.85rem;
+                border-radius: 8px;
+                box-sizing: border-box;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 4px;
+              "
+            >
+              Copy
+            </button>
+          </div>
+        </div>
+              <div class="settings-gate__field hidden" id="addonTunnelField">
+          <div
+            style="
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              margin-bottom: 6px;
+            "
+          >
+            <label
+              class="settings-gate__label"
+              for="addonManifestTunnelInput"
+              style="margin-bottom: 0"
+            >
+              Cloudflare Tunnel Manifest
+            </label>
+            <span
+              style="
+                font-size: 0.72rem;
+                background: var(--pm-bg-subtle);
+                color: var(--pm-text-secondary);
+                padding: 2px 6px;
+                border-radius: 6px;
+                font-weight: 600;
+              "
+              >Public</span
+            >
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; width: 100%; box-sizing: border-box;">
+            <input
+              type="text"
+              id="addonManifestTunnelInput"
+              class="settings-gate__input"
+              style="color: var(--pm-text-secondary); font-family: monospace; font-size: 0.88rem; flex: 1 1 0%; min-width: 0; box-sizing: border-box;"
+              readonly
+              value=""
+            />
+            <button
+              id="copyAddonManifestTunnelBtn"
+              class="settings-gate__btn"
+              style="
+                flex: 0 0 auto;
+                white-space: nowrap;
+                padding: 0 16px;
+                height: 38px;
+                min-width: 104px;
+                font-size: 0.85rem;
+                border-radius: 8px;
+                box-sizing: border-box;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 4px;
+              "
+            >
+              Copy
+            </button>
+          </div>
+          <a
+            id="addonStremioDirectBtn"
+            class="settings-gate__btn hidden"
+            href="#"
+            target="_blank"
+            rel="noopener noreferrer"
+            style="
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              gap: 8px;
+              width: 100%;
+              margin-top: 10px;
+              padding: 10px 16px;
+              text-decoration: none;
+              font-weight: 600;
+              background: var(--pm-accent);
+              color: var(--pm-text-primary);
+              box-sizing: border-box;
+            "
+          >
+            Add to Stremio
+          </a>
+        </div>
+              <div class="pm-card pm-card--inset">
+                <h3 class="pm-h3">Install without copying</h3>
+                <p class="pm-hint">
+                  Sends the address above to your Stremio account from this browser.
+                  Credentials go only to api.strem.io and are never stored on this server.
+                </p>
+                <div class="addon-stremio-sync" id="addonStremioSync">
+          <div class="addon-stremio-sync__title">
+            Install in Stremio (HTTP API Sync)
+          </div>
+          <p class="addon-stremio-sync__desc">
+            Stremio Web blocks HTTP addon URLs. This sends the selected HTTP
+            manifest to your Stremio account from the browser. Credentials go
+            only to
+            <code>api.strem.io</code> — nothing is stored on this server.
+          </p>
+
+          <div
+            class="addon-mode-toggle"
+            role="radiogroup"
+            aria-label="Manifest address"
+            id="stremioSyncModeToggle"
+          >
+            <label class="addon-mode-toggle__option">
+              <input
+                type="radio"
+                name="stremioSyncMode"
+                id="stremioSyncModeLan"
+                value="lan"
+                checked
+              />
+              <span>Wi-Fi / LAN</span>
+            </label>
+            <label class="addon-mode-toggle__option">
+              <input
+                type="radio"
+                name="stremioSyncMode"
+                id="stremioSyncModeLocal"
+                value="localhost"
+              />
+              <span>Localhost</span>
+            </label>
+          </div>
+          <div class="addon-stremio-sync__url" id="stremioSyncUrlPreview"></div>
+
+          <div class="settings-gate__field">
+            <label class="settings-gate__label" for="stremioSyncEmail"
+              >Stremio Email</label
+            >
+            <input
+              type="email"
+              id="stremioSyncEmail"
+              class="settings-gate__input"
+              autocomplete="username"
+              placeholder="you@example.com"
+            />
+          </div>
+          <div class="settings-gate__field">
+            <label class="settings-gate__label" for="stremioSyncPassword"
+              >Stremio Password</label
+            >
+            <input
+              type="password"
+              id="stremioSyncPassword"
+              class="settings-gate__input"
+              autocomplete="current-password"
+              placeholder="Your Stremio password"
+            />
+          </div>
+          <div class="settings-gate__field">
+            <label class="settings-gate__label" for="stremioSyncAuthKey"
+              >Auth Key (optional)</label
+            >
+            <input
+              type="password"
+              id="stremioSyncAuthKey"
+              class="settings-gate__input"
+              autocomplete="off"
+              placeholder="Paste instead of email/password"
+            />
+            <p class="addon-stremio-sync__hint">
+              From Stremio Web DevTools:
+              <code>JSON.parse(localStorage.getItem("profile")).auth.key</code>
+            </p>
+          </div>
+          <button
+            type="button"
+            id="stremioSyncInstallBtn"
+            class="settings-gate__btn addon-stremio-sync__btn"
+          >
+            Install via Stremio API Sync
+          </button>
+          <div
+            id="stremioSyncStatus"
+            class="settings-gate__status hidden"
+          ></div>
+        </div>
+              </div>
+              <div id="addonCopiedStatus" class="settings-gate__status ok hidden">
+          Copied to clipboard!
+        </div>
+
+            <div class="pm-card pm-card--inset">
+              <h3 class="pm-h3">Install steps</h3>
+              <p class="pm-hint">
+                The same address goes into the add-ons screen of every client above.
+              </p>
+              <div
+          class="instructions"
+          id="addonNuvioInstructions"
+          style="
+            margin-top: 18px;
+            text-align: left;
+            background: var(--pm-bg-canvas);
+            padding: 14px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--pm-border-subtle);
+          "
+        >
+          <div
+            style="
+              font-size: 0.88rem;
+              font-weight: 700;
+              color: var(--pm-text-primary);
+              margin-bottom: 8px;
+            "
+          >
+            How to install:
+          </div>
+          <ol
+            style="
+              margin-left: 18px;
+              color: var(--pm-text-secondary);
+              font-size: 0.82rem;
+              line-height: 1.5;
+            "
+          >
+            <li style="margin-bottom: 4px">
+              Make sure the device running the client can reach this server: the
+              <strong>same Wi-Fi network</strong>, or the public tunnel.
+            </li>
+            <li style="margin-bottom: 4px">
+              Open <strong>Stremio</strong>, <strong>Nuvio</strong>,
+              <strong>Streamr</strong>, <strong>Debrify</strong>,
+              <strong>WuPlay</strong>, <strong>Playtario</strong>,
+              <strong>ARVIO</strong> or <strong>Cinaura</strong>.
+            </li>
+            <li style="margin-bottom: 4px">
+              Go to that client's <strong>add-ons</strong> screen and choose to add
+              an add-on by URL.
+            </li>
+            <li>
+              Paste the address above and confirm. The add-on appears as
+              PencariMovie.
+            </li>
+          </ol>
+        </div>
+            </div>
+
+            <div class="pm-card pm-card--inset" style="margin-top: 16px">
+              <h3 class="pm-h3">Music add-on</h3>
+              <p class="pm-hint">
+                The only manifest that differs. Served from
+                <code>/music/manifest.json</code>, and it never uses a Wi-Fi address
+                because that address changes whenever your router hands out a new one.
+              </p>
+              <div id="pmMusicField">
+        <div class="settings-gate__field" style="margin-top: 16px;">
+          <div
+            style="
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              margin-bottom: 6px;
+            "
+          >
+            <label
+              class="settings-gate__label"
+              for="addonManifestEclipseInput"
+              style="margin-bottom: 0"
+            >
+              MUSIC MANIFEST
+            </label>
+            <span
+              style="
+                font-size: 0.72rem;
+                background: var(--pm-bg-subtle);
+                color: var(--pm-text-secondary);
+                padding: 2px 6px;
+                border-radius: 6px;
+                font-weight: 600;
+              "
+              >Music</span
+            >
+          </div>
+          <div style="display: flex; gap: 8px">
+            <input
+              type="text"
+              id="addonManifestEclipseInput"
+              class="settings-gate__input"
+              style="color: var(--pm-text-secondary); font-family: monospace; font-size: 0.88rem; flex: 1 1 0%; min-width: 0; box-sizing: border-box;"
+              readonly
+              value=""
+            />
+            <button
+              id="copyAddonManifestEclipseBtn"
+              class="settings-gate__btn"
+              style="
+                flex: 0 0 auto;
+                white-space: nowrap;
+                padding: 0 16px;
+                height: 38px;
+                min-width: 104px;
+                font-size: 0.85rem;
+                border-radius: 8px;
+                box-sizing: border-box;
+                background: var(--pm-accent);
+                color: var(--pm-text-primary);
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 4px;
+              "
+            >
+              Copy
+            </button>
+          </div>
+        </div></div>
+            </div>
+          </section>
+
+          <!-- ─── Bots ───────────────────────────────────────────── -->
+          <section class="pm-panel hidden" id="tab-bots" data-panel="bots">
+            <!-- The version lives once, in the sticky header (#dashVersion).
+                 #settingsVersion and #settingsConnectedVersion are not carried
+                 over: renderSettingsVersion() wrote the same string into both,
+                 and in the old gate only one was ever on screen. -->
+            <h2 class="pm-h2">Telegram bot pool</h2>
+            <div
+            id="settingsConnectedStatus"
+            class="settings-gate__status"
+            style="margin: 0 0 10px 0; text-align: center"
+          ></div>
+            <div id="settingsTokenSection">
           <p id="settingsDesc" class="settings-gate__desc">
             Enter your Telegram Bot Token to connect.
             <br /><small
@@ -267,168 +817,15 @@
           <div class="settings-gate__actions">
             <button id="connectBtn" class="settings-gate__btn">Connect</button>
           </div>
-          <p class="settings-gate__hint">
-            Already connected?
-            <button id="logoutBtn" class="settings-gate__link">
-              Disconnect
-            </button>
-          </p>
+          <!-- The old trailing escape hatch is gone: its button duplicated
+               #settingsDisconnectBtn (both bound to the same afterLogout) and
+               the sentence only made sense when the token form was the sole
+               face and the connected face lived in the other overlay. -->
         </div>
-
-        <div
-          id="settingsConnectedSection"
-          class="settings-gate__connected-info hidden"
-        >
-          <div class="settings-gate__header-wrap" style="margin-bottom: 8px">
-            <h2 class="settings-gate__title" style="margin-bottom: 0">
-              ⚙️ Settings
-            </h2>
-            <span
-              id="settingsConnectedVersion"
-              class="settings-gate__version-badge"
-            ></span>
-          </div>
-
-          <div
-            id="settingsConnectedStatus"
-            class="settings-gate__status"
-            style="margin: 0 0 10px 0; text-align: center"
-          ></div>
-
-          <div style="margin-bottom: 12px">
-            <button
-              type="button"
-              id="settingsSwitchToAddonBtn"
-              class="settings-gate__btn"
-              style="
-                width: 100%;
-                padding: 10px 14px;
-                font-size: 0.88rem;
-                background: #252525;
-                border: 1px solid #3a3a3a;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                gap: 6px;
-                cursor: pointer;
-              "
-            >
-              📡 Open Stremio & Nuvio Addon Setup
-            </button>
-          </div>
-
-          <div style="margin-bottom: 12px">
-            <a
-              id="settingsSearchWebsiteBtn"
-              class="settings-gate__btn"
-              href="https://pencarimovie.com/search/"
-              target="_blank"
-              rel="noopener"
-              title="Search on pencarimovie.com"
-              style="
-                width: 100%;
-                padding: 10px 14px;
-                font-size: 0.88rem;
-                background: #252525;
-                border: 1px solid #3a3a3a;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                gap: 6px;
-                cursor: pointer;
-                text-decoration: none;
-                box-sizing: border-box;
-              "
-            >
-              🔎 Search on pencarimovie.com
-            </a>
-          </div>
-
-          <!-- ─── Diagnostics / crash reporting ──────────────────── -->
-          <div
-            id="diagnosticsSection"
-            style="
-              margin-bottom: 12px;
-              padding: 10px 12px;
-              background: #1b1b1b;
-              border: 1px solid #333;
-              border-radius: 8px;
-              text-align: left;
-              box-sizing: border-box;
-            "
-          >
-            <label
-              style="
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                font-size: 0.85rem;
-                cursor: pointer;
-              "
-            >
-              <input
-                type="checkbox"
-                id="autoReportToggle"
-                checked
-                style="
-                  width: 16px;
-                  height: 16px;
-                  accent-color: var(--accent);
-                  flex: 0 0 auto;
-                "
-              />
-              <span>Auto-send Diagnostic & Crash Reports</span>
-            </label>
-            <div style="font-size: 0.72rem; color: #888; margin: 6px 0 8px 0">
-              Sends the device id, model, OS and the error details when the
-              server crashes, hangs, or a title fails to play. No bot token is
-              ever sent.
-            </div>
-            <div style="display: flex; gap: 6px; flex-wrap: wrap">
-              <button
-                type="button"
-                id="diagSelfTestBtn"
-                class="settings-gate__btn"
-                style="
-                  flex: 1 1 120px;
-                  padding: 8px 10px;
-                  font-size: 0.78rem;
-                  background: #252525;
-                  border: 1px solid #3a3a3a;
-                "
-              >
-                🩺 Run Self-Test
-              </button>
-              <button
-                type="button"
-                id="diagReportBtn"
-                class="settings-gate__btn"
-                style="
-                  flex: 1 1 120px;
-                  padding: 8px 10px;
-                  font-size: 0.78rem;
-                  background: #252525;
-                  border: 1px solid #3a3a3a;
-                "
-              >
-                📤 Send Reports
-              </button>
-            </div>
-            <div
-              id="diagStatus"
-              style="
-                font-size: 0.72rem;
-                color: #888;
-                margin-top: 8px;
-                white-space: pre-wrap;
-              "
-            ></div>
-          </div>
-
-          <div class="settings-gate__bots-container">
+            <div class="settings-gate__bots-container">
             <div class="settings-gate__bots-header">
               <span class="settings-gate__bots-title"
-                >🤖 Bot Pool (<span id="botPoolCount">1</span>)</span
+                >Bot Pool (<span id="botPoolCount">1</span>)</span
               >
               <button
                 type="button"
@@ -436,7 +833,7 @@
                 class="settings-gate__link"
                 style="
                   font-size: 0.8rem;
-                  color: var(--accent);
+                  color: var(--pm-accent);
                   cursor: pointer;
                   white-space: nowrap;
                 "
@@ -486,8 +883,8 @@
                   style="
                     padding: 6px 12px;
                     font-size: 0.8rem;
-                    background: rgba(255, 255, 255, 0.1);
-                    color: #ccc;
+                    background: var(--pm-bg-surface-hover);
+                    color: var(--pm-text-secondary);
                   "
                 >
                   Cancel
@@ -498,7 +895,7 @@
                 style="
                   font-size: 0.78rem;
                   margin-top: 4px;
-                  color: #ff6b35;
+                  color: var(--pm-accent);
                   word-break: break-word;
                 "
               ></div>
@@ -506,8 +903,7 @@
 
             <div id="botPoolList" class="settings-gate__bots-list"></div>
           </div>
-
-          <div style="display: flex; gap: 8px; margin-top: 14px">
+            <div style="display: flex; gap: 8px; margin-top: 14px">
             <button
               id="settingsDisconnectBtn"
               class="settings-gate__btn settings-gate__btn--danger"
@@ -516,53 +912,17 @@
               Disconnect All
             </button>
           </div>
+          </section>
 
-
-          <!-- Change Password Box -->
-          <div class="settings-gate__addon-box" style="margin-top: 14px">
-            <span>🔑 Change Password</span>
-            <div
-              style="
-                display: flex;
-                flex-direction: column;
-                gap: 8px;
-                margin-top: 10px;
-              "
-            >
-              <input
-                type="password"
-                id="changePwCurrent"
-                class="settings-gate__input"
-                placeholder="Current Password"
-                autocomplete="current-password"
-                style="padding: 8px 12px; font-size: 0.85rem"
-              />
-              <input
-                type="password"
-                id="changePwNew"
-                class="settings-gate__input"
-                placeholder="New Password (min. 4 characters)"
-                autocomplete="new-password"
-                style="padding: 8px 12px; font-size: 0.85rem"
-              />
-              <button
-                type="button"
-                id="changePwBtn"
-                class="settings-gate__btn"
-                style="padding: 8px 14px; font-size: 0.85rem"
-              >
-                Update Password
-              </button>
-              <div
-                id="changePwStatus"
-                class="settings-gate__status"
-                style="margin: 0"
-              ></div>
-            </div>
-          </div>
-
-          <div class="settings-gate__addon-box settings-gate__tunnel-box">
-            <span>☁️ Cloudflare Tunnel</span>
+          <!-- ─── Tunnel ─────────────────────────────────────────── -->
+          <section class="pm-panel hidden" id="tab-tunnel" data-panel="tunnel">
+            <h2 class="pm-h2">Cloudflare tunnel</h2>
+            <p class="pm-lede">
+              Exposes this server on a public HTTPS address so clients outside your
+              network can reach it.
+            </p>
+            <div class="settings-gate__addon-box settings-gate__tunnel-box">
+            <span>Cloudflare Tunnel</span>
             <p class="settings-gate__tunnel-desc" id="tunnelDescText">
               Expose this server publicly for remote streaming. Leave blank for
               a free automatic Quick Tunnel (<code>*.trycloudflare.com</code>),
@@ -597,7 +957,7 @@
                 id="copyTunnelUrlBtn"
                 class="settings-gate__btn"
               >
-                📋 Copy
+                Copy
               </button>
             </div>
 
@@ -622,52 +982,16 @@
               </button>
             </div>
           </div>
-        </div>
-      </div>
-    </div>
+          </section>
 
-    <!-- ─── Addon Configuration Modal ──────────────────────────── -->
-    <div id="addonModal" class="settings-gate hidden" aria-hidden="true">
-      <div class="settings-gate__card settings-gate__card--addon">
-        <button
-          id="addonModalClose"
-          class="settings-gate__close"
-          aria-label="Close"
-        >
-          ✕
-        </button>
-
-        <h2 class="settings-gate__title" id="addonModalTitle">
-          🧩 PencariMovie Addon Configuration
-        </h2>
-        <p class="settings-gate__desc" id="addonModalDesc">
-          Install this addon in Stremio / Nuvio or copy the manifest URL.
-        </p>
-
-        <div style="margin-bottom: 14px">
-          <button
-            type="button"
-            id="addonSwitchToSettingsBtn"
-            class="settings-gate__btn"
-            style="
-              width: 100%;
-              padding: 10px 14px;
-              font-size: 0.88rem;
-              background: #252525;
-              border: 1px solid #3a3a3a;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              gap: 6px;
-              cursor: pointer;
-            "
-          >
-            🤖 Bot Pool & Server Settings
-          </button>
-        </div>
-
-        <!-- ─── Catalog Settings Card ───────────────────────────── -->
-        <div class="addon-catalog-card" id="addonCatalogCard">
+          <!-- ─── System ─────────────────────────────────────────── -->
+          <!-- ─── Catalogs ───────────────────────────────────────── -->
+          <section class="pm-panel hidden" id="tab-catalogs" data-panel="catalogs">
+            <h2 class="pm-h2">Catalogs</h2>
+            <p class="pm-lede">
+              Catalogs and stream filters apply to every client at once.
+            </p>
+              <div class="addon-catalog-card" id="addonCatalogCard">
           <div class="addon-catalog-card__header">
             <div
               style="
@@ -678,11 +1002,11 @@
               "
             >
               <span class="addon-catalog-card__title"
-                >🗂️ Catalog Configuration</span
+                >Catalog Configuration</span
               >
               <div class="addon-country-wrap">
                 <label for="addonCountrySelect" class="addon-country-label"
-                  >🌍 Region:</label
+                  >Region:</label
                 >
                 <input
                   id="addonCountrySelect"
@@ -746,15 +1070,15 @@
               <div class="addon-catalog-pill-group">
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="catTypeMovies" checked />
-                  <span>🎬 Movies</span>
+                  <span>Movies</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="catTypeSeries" checked />
-                  <span>📺 Series</span>
+                  <span>Series</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="catTypeOther" checked />
-                  <span>⚡ Telegram Files (Other)</span>
+                  <span>Telegram Files (Other)</span>
                 </label>
               </div>
             </div>
@@ -813,7 +1137,7 @@
             class="addon-catalog-section"
             style="
               margin-top: 14px;
-              border-top: 1px dashed rgba(255, 255, 255, 0.1);
+              border-top: 1px dashed var(--pm-bg-surface-hover);
               padding-top: 12px;
             "
           >
@@ -825,7 +1149,7 @@
                 align-items: center;
               "
             >
-              <span>🔗 Upstream Stremio Addons:</span>
+              <span>Upstream Stremio Addons:</span>
             </div>
             <label
               style="
@@ -835,7 +1159,7 @@
                 margin: 6px 0 8px 0;
                 cursor: pointer;
                 font-size: 0.8rem;
-                color: #fff;
+                color: var(--pm-text-primary);
               "
             >
               <input
@@ -845,7 +1169,7 @@
               />
               <span
                 >Enable upstream addons
-                <span style="color: #888; font-size: 0.72rem"
+                <span style="color: var(--pm-text-muted); font-size: 0.72rem"
                   >(turn off to hide all bridged catalogs)</span
                 ></span
               >
@@ -903,7 +1227,7 @@
             class="addon-catalog-section"
             style="
               margin-top: 14px;
-              border-top: 1px dashed rgba(255, 255, 255, 0.1);
+              border-top: 1px dashed var(--pm-bg-surface-hover);
               padding-top: 12px;
             "
           >
@@ -915,12 +1239,12 @@
                 align-items: center;
               "
             >
-              <span>📺 Streams Configuration:</span>
+              <span>Streams Configuration:</span>
             </div>
             <p
               style="
                 font-size: 0.74rem;
-                color: #aaa;
+                color: var(--pm-text-secondary);
                 margin: 4px 0 8px 0;
                 line-height: 1.35;
               "
@@ -931,103 +1255,103 @@
 
             <!-- Resolutions -->
             <div style="margin-bottom: 8px">
-              <div style="font-size: 0.76rem; color: #bbb; margin-bottom: 4px">
+              <div style="font-size: 0.76rem; color: var(--pm-text-secondary); margin-bottom: 4px">
                 Resolutions:
               </div>
               <div class="addon-catalog-pill-group">
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamRes4k" checked />
-                  <span>✨ 4K / UHD (2160p)</span>
+                  <span>4K / UHD (2160p)</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamRes1080p" checked />
-                  <span>🧿 1080p (FHD)</span>
+                  <span>1080p (FHD)</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamRes720p" checked />
-                  <span>💿 720p (HD)</span>
+                  <span>720p (HD)</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamResSd" checked />
-                  <span>📁 SD (480p / 360p)</span>
+                  <span>SD (480p / 360p)</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamResUnknown" checked />
-                  <span>❓ Unknown</span>
+                  <span>Unknown</span>
                 </label>
               </div>
             </div>
 
             <!-- Source Qualities -->
             <div style="margin-bottom: 8px">
-              <div style="font-size: 0.76rem; color: #bbb; margin-bottom: 4px">
+              <div style="font-size: 0.76rem; color: var(--pm-text-secondary); margin-bottom: 4px">
                 Source Qualities:
               </div>
               <div class="addon-catalog-pill-group">
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamQualRemux" checked />
-                  <span>🏆 BluRay REMUX</span>
+                  <span>BluRay REMUX</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamQualBluray" checked />
-                  <span>💿 BluRay</span>
+                  <span>BluRay</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamQualWebdl" checked />
-                  <span>🌐 WEB-DL</span>
+                  <span>WEB-DL</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamQualWebrip" checked />
-                  <span>⚡ WEBRip</span>
+                  <span>WEBRip</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamQualHdtv" checked />
-                  <span>📺 HDTV</span>
+                  <span>HDTV</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamQualCam" checked />
-                  <span>🎥 CAM / Telesync</span>
+                  <span>CAM / Telesync</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamExcludeCam" />
-                  <span style="color: #ff5e57">🚫 Block All CAM</span>
+                  <span style="color: var(--pm-status-danger)">Block All CAM</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamExcludeUnplayable" checked />
-                  <span style="color: #ff5e57">🚫 Exclude Unplayable</span>
+                  <span style="color: var(--pm-status-danger)">Exclude Unplayable</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamExcludePartTitle" checked />
-                  <span style="color: #ff5e57">🚫 Exclude Part Titles</span>
+                  <span style="color: var(--pm-status-danger)">Exclude Part Titles</span>
                 </label>
               </div>
             </div>
 
             <!-- Video Encodes & Visual Tags -->
             <div style="margin-bottom: 8px">
-              <div style="font-size: 0.76rem; color: #bbb; margin-bottom: 4px">
+              <div style="font-size: 0.76rem; color: var(--pm-text-secondary); margin-bottom: 4px">
                 Encodes & Formats:
               </div>
               <div class="addon-catalog-pill-group">
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamEncHevc" checked />
-                  <span>🎞️ HEVC (H.265)</span>
+                  <span>HEVC (H.265)</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamEncAvc" checked />
-                  <span>🎞️ AVC (H.264)</span>
+                  <span>AVC (H.264)</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamEncAv1" checked />
-                  <span>🎞️ AV1</span>
+                  <span>AV1</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamVisHdr" checked />
-                  <span>🌈 HDR / HDR10+</span>
+                  <span>HDR / HDR10+</span>
                 </label>
                 <label class="addon-catalog-pill">
                   <input type="checkbox" id="streamVisDv" checked />
-                  <span>👓 Dolby Vision</span>
+                  <span>Dolby Vision</span>
                 </label>
               </div>
             </div>
@@ -1045,7 +1369,7 @@
               <div style="display: flex; align-items: center; gap: 5px">
                 <label
                   for="streamPreferredRes"
-                  style="font-size: 0.76rem; color: #ccc"
+                  style="font-size: 0.76rem; color: var(--pm-text-secondary)"
                   >Priority:</label
                 >
                 <select
@@ -1055,10 +1379,10 @@
                     padding: 4px 6px;
                     font-size: 0.76rem;
                     width: auto;
-                    background: rgba(0, 0, 0, 0.4);
-                    border: 1px solid rgba(255, 255, 255, 0.15);
+                    background: var(--pm-bg-canvas);
+                    border: 1px solid var(--pm-border-strong);
                     border-radius: 4px;
-                    color: #fff;
+                    color: var(--pm-text-primary);
                   "
                 >
                   <option value="auto">Auto (Highest First)</option>
@@ -1072,7 +1396,7 @@
               <div style="display: flex; align-items: center; gap: 5px">
                 <label
                   for="streamMaxPerRes"
-                  style="font-size: 0.76rem; color: #ccc"
+                  style="font-size: 0.76rem; color: var(--pm-text-secondary)"
                   >Max / Resolution:</label
                 >
                 <select
@@ -1082,10 +1406,10 @@
                     padding: 4px 6px;
                     font-size: 0.76rem;
                     width: auto;
-                    background: rgba(0, 0, 0, 0.4);
-                    border: 1px solid rgba(255, 255, 255, 0.15);
+                    background: var(--pm-bg-canvas);
+                    border: 1px solid var(--pm-border-strong);
                     border-radius: 4px;
-                    color: #fff;
+                    color: var(--pm-text-primary);
                   "
                 >
                   <option value="0">All Available</option>
@@ -1100,7 +1424,7 @@
               <div style="display: flex; align-items: center; gap: 5px">
                 <label
                   for="streamMaxTotal"
-                  style="font-size: 0.76rem; color: #ccc"
+                  style="font-size: 0.76rem; color: var(--pm-text-secondary)"
                   >Max Total:</label
                 >
                 <select
@@ -1110,10 +1434,10 @@
                     padding: 4px 6px;
                     font-size: 0.76rem;
                     width: auto;
-                    background: rgba(0, 0, 0, 0.4);
-                    border: 1px solid rgba(255, 255, 255, 0.15);
+                    background: var(--pm-bg-canvas);
+                    border: 1px solid var(--pm-border-strong);
                     border-radius: 4px;
-                    color: #fff;
+                    color: var(--pm-text-primary);
                   "
                 >
                   <option value="0">Default (100)</option>
@@ -1127,7 +1451,7 @@
               <div style="display: flex; align-items: center; gap: 5px">
                 <label
                   for="streamMinSizeMb"
-                  style="font-size: 0.76rem; color: #ccc"
+                  style="font-size: 0.76rem; color: var(--pm-text-secondary)"
                   >Min Size:</label
                 >
                 <input
@@ -1141,10 +1465,10 @@
                     padding: 4px 6px;
                     font-size: 0.76rem;
                     width: 68px;
-                    background: rgba(0, 0, 0, 0.4);
-                    border: 1px solid rgba(255, 255, 255, 0.15);
+                    background: var(--pm-bg-canvas);
+                    border: 1px solid var(--pm-border-strong);
                     border-radius: 4px;
-                    color: #fff;
+                    color: var(--pm-text-primary);
                   "
                 />
               </div>
@@ -1152,7 +1476,7 @@
               <div style="display: flex; align-items: center; gap: 5px">
                 <label
                   for="streamMaxSizeGb"
-                  style="font-size: 0.76rem; color: #ccc"
+                  style="font-size: 0.76rem; color: var(--pm-text-secondary)"
                   >Max Size:</label
                 >
                 <input
@@ -1166,10 +1490,10 @@
                     padding: 4px 6px;
                     font-size: 0.76rem;
                     width: 68px;
-                    background: rgba(0, 0, 0, 0.4);
-                    border: 1px solid rgba(255, 255, 255, 0.15);
+                    background: var(--pm-bg-canvas);
+                    border: 1px solid var(--pm-border-strong);
                     border-radius: 4px;
-                    color: #fff;
+                    color: var(--pm-text-primary);
                   "
                 />
               </div>
@@ -1187,7 +1511,7 @@
               <div style="display: flex; gap: 6px; align-items: center">
                 <label
                   for="streamExcludedKeywords"
-                  style="font-size: 0.74rem; color: #ff7675; min-width: 105px"
+                  style="font-size: 0.74rem; color: var(--pm-status-danger); min-width: 105px"
                   >Exclude Keywords:</label
                 >
                 <input
@@ -1199,17 +1523,17 @@
                     padding: 4px 8px;
                     font-size: 0.74rem;
                     flex: 1;
-                    background: rgba(0, 0, 0, 0.4);
-                    border: 1px solid rgba(255, 255, 255, 0.15);
+                    background: var(--pm-bg-canvas);
+                    border: 1px solid var(--pm-border-strong);
                     border-radius: 4px;
-                    color: #fff;
+                    color: var(--pm-text-primary);
                   "
                 />
               </div>
               <div style="display: flex; gap: 6px; align-items: center">
                 <label
                   for="streamRequiredKeywords"
-                  style="font-size: 0.74rem; color: #55efc4; min-width: 105px"
+                  style="font-size: 0.74rem; color: var(--pm-status-online); min-width: 105px"
                   >Require Keywords:</label
                 >
                 <input
@@ -1221,10 +1545,10 @@
                     padding: 4px 8px;
                     font-size: 0.74rem;
                     flex: 1;
-                    background: rgba(0, 0, 0, 0.4);
-                    border: 1px solid rgba(255, 255, 255, 0.15);
+                    background: var(--pm-bg-canvas);
+                    border: 1px solid var(--pm-border-strong);
                     border-radius: 4px;
-                    color: #fff;
+                    color: var(--pm-text-primary);
                   "
                 />
               </div>
@@ -1248,23 +1572,21 @@
                 text-align: center;
               "
             >
-              💾 Save Addon Configuration
+              Save Addon Configuration
             </button>
             <span id="catSaveStatus" class="addon-catalog-status-msg hidden"
               >Saved!</span
             >
           </div>
         </div>
-
-        <!-- Settings JSON (backup / restore) -->
-        <div class="addon-catalog-card" id="addonSettingsJsonCard">
+              <div class="addon-catalog-card" id="addonSettingsJsonCard">
           <div class="addon-catalog-card__header">
-            <span class="addon-catalog-card__title">⚙️ Settings JSON</span>
+            <span class="addon-catalog-card__title">Settings JSON</span>
           </div>
           <div
             style="
               font-size: 0.72rem;
-              color: #aaa;
+              color: var(--pm-text-secondary);
               line-height: 1.5;
               margin-bottom: 6px;
             "
@@ -1289,9 +1611,9 @@
               font-family: monospace;
               font-size: 0.68rem;
               line-height: 1.4;
-              color: #fff;
-              background: rgba(0, 0, 0, 0.4);
-              border: 1px solid rgba(255, 255, 255, 0.15);
+              color: var(--pm-text-primary);
+              background: var(--pm-bg-canvas);
+              border: 1px solid var(--pm-border-strong);
               border-radius: 6px;
               padding: 8px;
             "
@@ -1303,7 +1625,7 @@
               class="settings-gate__btn addon-catalog-save-btn"
               style="padding: 8px 12px; font-size: 0.82rem"
             >
-              📋 Copy JSON
+              Copy JSON
             </button>
             <button
               type="button"
@@ -1311,535 +1633,157 @@
               class="settings-gate__btn addon-catalog-save-btn"
               style="padding: 8px 12px; font-size: 0.82rem"
             >
-              ⬆️ Apply pasted JSON
+              Apply pasted JSON
             </button>
           </div>
           <span id="catSettingsIoStatus" class="addon-catalog-status-msg"></span>
         </div>
+          </section>
 
-        <!-- Access Token Card -->
-        <div class="addon-catalog-card" id="addonTokenCard">
-          <div class="addon-catalog-card__header">
-            <span class="addon-catalog-card__title">🔑 Access Token</span>
-            <span class="addon-catalog-card__badge" id="addonTokenBadge"
-              >Active</span
-            >
-          </div>
-          <div style="display: flex; gap: 8px; align-items: center; width: 100%; box-sizing: border-box;">
-            <input
-              type="text"
-              id="addonTokenInput"
-              class="settings-gate__input"
-              style="font-family: monospace; font-size: 0.82rem; flex: 1 1 0%; min-width: 0; box-sizing: border-box;"
-              readonly
-              value=""
-            />
-            <button
-              type="button"
-              id="addonTokenCopyBtn"
-              class="settings-gate__btn"
+          <!-- ─── System ─────────────────────────────────────────── -->
+          <section class="pm-panel hidden" id="tab-system" data-panel="system">
+            <h2 class="pm-h2">Security</h2>
+            <p class="pm-lede">
+              The server password guards this dashboard when it is reachable from
+              outside this machine. Diagnostics reports never contain a bot token.
+            </p>
+              <!-- Change Password Box -->
+          <div class="settings-gate__addon-box" style="margin-top: 14px">
+            <span>Change Password</span>
+            <div
               style="
-                flex: 0 0 auto;
-                white-space: nowrap;
-                padding: 8px 12px;
-                font-size: 0.82rem;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                margin-top: 10px;
               "
             >
-              📋
-            </button>
-            <button
-              type="button"
-              id="addonTokenRotateBtn"
-              class="settings-gate__btn"
-              style="
-                flex: 0 0 auto;
-                white-space: nowrap;
-                padding: 8px 12px;
-                font-size: 0.82rem;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                gap: 4px;
-              "
-            >
-              🔄 Regenerate
-            </button>
+              <input
+                type="password"
+                id="changePwCurrent"
+                class="settings-gate__input"
+                placeholder="Current Password"
+                autocomplete="current-password"
+                style="padding: 8px 12px; font-size: 0.85rem"
+              />
+              <input
+                type="password"
+                id="changePwNew"
+                class="settings-gate__input"
+                placeholder="New Password (min. 4 characters)"
+                autocomplete="new-password"
+                style="padding: 8px 12px; font-size: 0.85rem"
+              />
+              <button
+                type="button"
+                id="changePwBtn"
+                class="settings-gate__btn"
+                style="padding: 8px 14px; font-size: 0.85rem"
+              >
+                Update Password
+              </button>
+              <div
+                id="changePwStatus"
+                class="settings-gate__status"
+                style="margin: 0"
+              ></div>
+            </div>
           </div>
-          <div
-            id="addonTokenStatus"
-            class="addon-catalog-status-msg hidden"
-          ></div>
-        </div>
-
-        <!-- Wi-Fi / LAN Manifest Field -->
-        <div class="settings-gate__field" id="addonLanField">
-          <div
+              <div
+            id="diagnosticsSection"
             style="
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              margin-bottom: 6px;
-            "
-          >
-            <label
-              class="settings-gate__label"
-              for="addonManifestLanInput"
-              style="margin-bottom: 0"
-            >
-              📡 Wi-Fi / LAN Manifest (TV, Phone, Tablet)
-            </label>
-            <span
-              style="
-                font-size: 0.72rem;
-                background: rgba(0, 210, 106, 0.15);
-                color: #00d26a;
-                padding: 2px 6px;
-                border-radius: 6px;
-                font-weight: 600;
-              "
-              >Remote</span
-            >
-          </div>
-          <div style="display: flex; gap: 8px; align-items: center; width: 100%; box-sizing: border-box;">
-            <input
-              type="text"
-              id="addonManifestLanInput"
-              class="settings-gate__input"
-              style="color: #00d26a; font-family: monospace; font-size: 0.88rem; flex: 1 1 0%; min-width: 0; box-sizing: border-box;"
-              readonly
-              value=""
-            />
-            <button
-              id="copyAddonManifestLanBtn"
-              class="settings-gate__btn"
-              style="
-                flex: 0 0 auto;
-                white-space: nowrap;
-                padding: 0 16px;
-                height: 38px;
-                min-width: 104px;
-                font-size: 0.85rem;
-                border-radius: 8px;
-                box-sizing: border-box;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                gap: 4px;
-              "
-            >
-              📋 Copy
-            </button>
-          </div>
-        </div>
-
-        <!-- Localhost Manifest Field -->
-        <div class="settings-gate__field" id="addonLocalField">
-          <div
-            style="
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              margin-bottom: 6px;
-            "
-          >
-            <label
-              class="settings-gate__label"
-              id="addonLocalFieldLabel"
-              for="addonManifestInput"
-              style="margin-bottom: 0"
-            >
-              💻 Localhost Manifest (This Device Only)
-            </label>
-            <span
-              id="addonLocalFieldBadge"
-              style="
-                font-size: 0.72rem;
-                background: rgba(255, 255, 255, 0.08);
-                color: #aaa;
-                padding: 2px 6px;
-                border-radius: 6px;
-                font-weight: 600;
-              "
-              >Local</span
-            >
-          </div>
-          <div style="display: flex; gap: 8px; align-items: center; width: 100%; box-sizing: border-box;">
-            <input
-              type="text"
-              id="addonManifestInput"
-              class="settings-gate__input"
-              style="color: #bbb; font-family: monospace; font-size: 0.88rem; flex: 1 1 0%; min-width: 0; box-sizing: border-box;"
-              readonly
-              value=""
-            />
-            <button
-              id="copyAddonManifestBtn"
-              class="settings-gate__btn"
-              style="
-                background: rgba(255, 255, 255, 0.1);
-                color: #ddd;
-                flex: 0 0 auto;
-                white-space: nowrap;
-                padding: 0 16px;
-                height: 38px;
-                min-width: 104px;
-                font-size: 0.85rem;
-                border-radius: 8px;
-                box-sizing: border-box;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                gap: 4px;
-              "
-            >
-              📋 Copy
-            </button>
-          </div>
-        </div>
-
-        <div class="settings-gate__field hidden" id="addonTunnelField">
-          <div
-            style="
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              margin-bottom: 6px;
-            "
-          >
-            <label
-              class="settings-gate__label"
-              for="addonManifestTunnelInput"
-              style="margin-bottom: 0"
-            >
-              ☁️ Cloudflare Tunnel Manifest
-            </label>
-            <span
-              style="
-                font-size: 0.72rem;
-                background: rgba(255, 107, 53, 0.18);
-                color: #ff8a5b;
-                padding: 2px 6px;
-                border-radius: 6px;
-                font-weight: 600;
-              "
-              >Public</span
-            >
-          </div>
-          <div style="display: flex; gap: 8px; align-items: center; width: 100%; box-sizing: border-box;">
-            <input
-              type="text"
-              id="addonManifestTunnelInput"
-              class="settings-gate__input"
-              style="color: #ff8a5b; font-family: monospace; font-size: 0.88rem; flex: 1 1 0%; min-width: 0; box-sizing: border-box;"
-              readonly
-              value=""
-            />
-            <button
-              id="copyAddonManifestTunnelBtn"
-              class="settings-gate__btn"
-              style="
-                flex: 0 0 auto;
-                white-space: nowrap;
-                padding: 0 16px;
-                height: 38px;
-                min-width: 104px;
-                font-size: 0.85rem;
-                border-radius: 8px;
-                box-sizing: border-box;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                gap: 4px;
-              "
-            >
-              📋 Copy
-            </button>
-          </div>
-          <a
-            id="addonStremioDirectBtn"
-            class="settings-gate__btn hidden"
-            href="#"
-            target="_blank"
-            rel="noopener noreferrer"
-            style="
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              gap: 8px;
-              width: 100%;
-              margin-top: 10px;
-              padding: 10px 16px;
-              text-decoration: none;
-              font-weight: 600;
-              background: #ff6b35;
-              color: #fff;
+              margin-bottom: 12px;
+              padding: 10px 12px;
+              background: var(--pm-bg-surface);
+              border: 1px solid var(--pm-border-subtle);
+              border-radius: 8px;
+              text-align: left;
               box-sizing: border-box;
             "
           >
-            🎬 Add to Stremio
-          </a>
-        </div>
-
-        <!-- Music addon manifest -->
-        <div class="settings-gate__field" style="margin-top: 16px;">
-          <div
-            style="
-              display: flex;
-              align-items: center;
-              justify-content: space-between;
-              margin-bottom: 6px;
-            "
-          >
             <label
-              class="settings-gate__label"
-              for="addonManifestEclipseInput"
-              style="margin-bottom: 0"
+              style="
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                font-size: 0.85rem;
+                cursor: pointer;
+              "
             >
-              🎵 MUSIC MANIFEST
+              <input
+                type="checkbox"
+                id="autoReportToggle"
+                checked
+                style="
+                  width: 16px;
+                  height: 16px;
+                  accent-color: var(--pm-accent);
+                  flex: 0 0 auto;
+                "
+              />
+              <span>Auto-send Diagnostic & Crash Reports</span>
             </label>
-            <span
+            <div style="font-size: 0.72rem; color: var(--pm-text-muted); margin: 6px 0 8px 0">
+              Sends the device id, model, OS and the error details when the
+              server crashes, hangs, or a title fails to play. No bot token is
+              ever sent.
+            </div>
+            <div style="display: flex; gap: 6px; flex-wrap: wrap">
+              <button
+                type="button"
+                id="diagSelfTestBtn"
+                class="settings-gate__btn"
+                style="
+                  flex: 1 1 120px;
+                  padding: 8px 10px;
+                  font-size: 0.78rem;
+                  background: var(--pm-bg-surface-elevated);
+                  border: 1px solid var(--pm-border-subtle);
+                "
+              >
+                Run Self-Test
+              </button>
+              <button
+                type="button"
+                id="diagReportBtn"
+                class="settings-gate__btn"
+                style="
+                  flex: 1 1 120px;
+                  padding: 8px 10px;
+                  font-size: 0.78rem;
+                  background: var(--pm-bg-surface-elevated);
+                  border: 1px solid var(--pm-border-subtle);
+                "
+              >
+                Send Reports
+              </button>
+            </div>
+            <div
+              id="diagStatus"
               style="
                 font-size: 0.72rem;
-                background: rgba(225, 29, 72, 0.15);
-                color: #fb7185;
-                padding: 2px 6px;
-                border-radius: 6px;
-                font-weight: 600;
+                color: var(--pm-text-muted);
+                margin-top: 8px;
+                white-space: pre-wrap;
               "
-              >Music</span
-            >
+            ></div>
           </div>
-          <div style="display: flex; gap: 8px">
-            <input
-              type="text"
-              id="addonManifestEclipseInput"
-              class="settings-gate__input"
-              style="color: #fb7185; font-family: monospace; font-size: 0.88rem; flex: 1 1 0%; min-width: 0; box-sizing: border-box;"
-              readonly
-              value=""
-            />
-            <button
-              id="copyAddonManifestEclipseBtn"
-              class="settings-gate__btn"
-              style="
-                flex: 0 0 auto;
-                white-space: nowrap;
-                padding: 0 16px;
-                height: 38px;
-                min-width: 104px;
-                font-size: 0.85rem;
-                border-radius: 8px;
-                box-sizing: border-box;
-                background: #e11d48;
-                color: #fff;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                gap: 4px;
-              "
-            >
-              📋 Copy
-            </button>
-          </div>
+          </section>
+
         </div>
+      </main>
 
-        <div id="addonCopiedStatus" class="settings-gate__status ok hidden">
-          ✓ Copied to clipboard!
-        </div>
-
-        <!-- Stremio HTTP API Sync Card -->
-        <div class="addon-stremio-sync" id="addonStremioSync">
-          <div class="addon-stremio-sync__title">
-            🎬 Install in Stremio (HTTP API Sync)
-          </div>
-          <p class="addon-stremio-sync__desc">
-            Stremio Web blocks HTTP addon URLs. This sends the selected HTTP
-            manifest to your Stremio account from the browser. Credentials go
-            only to
-            <code>api.strem.io</code> — nothing is stored on this server.
-          </p>
-
-          <div
-            class="addon-mode-toggle"
-            role="radiogroup"
-            aria-label="Manifest address"
-            id="stremioSyncModeToggle"
-          >
-            <label class="addon-mode-toggle__option">
-              <input
-                type="radio"
-                name="stremioSyncMode"
-                id="stremioSyncModeLan"
-                value="lan"
-                checked
-              />
-              <span>📡 Wi-Fi / LAN</span>
-            </label>
-            <label class="addon-mode-toggle__option">
-              <input
-                type="radio"
-                name="stremioSyncMode"
-                id="stremioSyncModeLocal"
-                value="localhost"
-              />
-              <span>💻 Localhost</span>
-            </label>
-          </div>
-          <div class="addon-stremio-sync__url" id="stremioSyncUrlPreview"></div>
-
-          <div class="settings-gate__field">
-            <label class="settings-gate__label" for="stremioSyncEmail"
-              >Stremio Email</label
-            >
-            <input
-              type="email"
-              id="stremioSyncEmail"
-              class="settings-gate__input"
-              autocomplete="username"
-              placeholder="you@example.com"
-            />
-          </div>
-          <div class="settings-gate__field">
-            <label class="settings-gate__label" for="stremioSyncPassword"
-              >Stremio Password</label
-            >
-            <input
-              type="password"
-              id="stremioSyncPassword"
-              class="settings-gate__input"
-              autocomplete="current-password"
-              placeholder="Your Stremio password"
-            />
-          </div>
-          <div class="settings-gate__field">
-            <label class="settings-gate__label" for="stremioSyncAuthKey"
-              >Auth Key (optional)</label
-            >
-            <input
-              type="password"
-              id="stremioSyncAuthKey"
-              class="settings-gate__input"
-              autocomplete="off"
-              placeholder="Paste instead of email/password"
-            />
-            <p class="addon-stremio-sync__hint">
-              From Stremio Web DevTools:
-              <code>JSON.parse(localStorage.getItem("profile")).auth.key</code>
-            </p>
-          </div>
-          <button
-            type="button"
-            id="stremioSyncInstallBtn"
-            class="settings-gate__btn addon-stremio-sync__btn"
-          >
-            Install via Stremio API Sync
-          </button>
-          <div
-            id="stremioSyncStatus"
-            class="settings-gate__status hidden"
-          ></div>
-        </div>
-
-        <div
-          class="instructions"
-          id="addonNuvioInstructions"
-          style="
-            margin-top: 18px;
-            text-align: left;
-            background: rgba(0, 0, 0, 0.3);
-            padding: 14px 16px;
-            border-radius: 8px;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-          "
-        >
-          <div
-            style="
-              font-size: 0.88rem;
-              font-weight: 700;
-              color: #fff;
-              margin-bottom: 8px;
-            "
-          >
-            🚀 How to install in Nuvio:
-          </div>
-          <ol
-            style="
-              margin-left: 18px;
-              color: #aaa;
-              font-size: 0.82rem;
-              line-height: 1.5;
-            "
-          >
-            <li style="margin-bottom: 4px">
-              Connect your Android TV, phone, or tablet to the
-              <strong>same Wi-Fi network</strong>.
-            </li>
-            <li style="margin-bottom: 4px">
-              Open the <strong>Nuvio</strong> app.
-            </li>
-            <li style="margin-bottom: 4px">
-              Go to <strong>profile</strong> &rarr;
-              <strong>content & discovery</strong> &rarr;
-              <strong>addons</strong>.
-            </li>
-            <li>
-              Paste the <strong>Wi-Fi / LAN Manifest URL</strong> and click
-              <strong>Install addon</strong>.
-            </li>
-          </ol>
-        </div>
-      </div>
+      <footer class="pm-footer">
+        <div class="pm-container">PencariMovie Server &middot; Single Rust Executable</div>
+      </footer>
     </div>
 
-    <!-- ─── Core JS and Nuvio Shell ───────────────────────────── -->
+    <!-- ─── Core Scripts ─────────────────────────────────────────── -->
     <script src="boot-guard.js?v=20261009pm10"></script>
     <!-- fetch / Object.entries / closest / AbortController for old WebViews
          (Android 5.1 = Chromium 39). No-ops on modern engines. -->
     <script src="assets/runtime/legacy-polyfills.js?v=20261009pm10"></script>
-    <script
-      defer
-      src="core-js.bundle.js?v=20261009pm10"
-      onerror="window.NuvioBootGuard && window.NuvioBootGuard.scriptFailed(this.src)"
-    ></script>
-    <script defer src="nuvio.env.js?v=20261009pm10"></script>
-    <script defer src="assets/libs/qrcode-generator.js?v=20261009pm10"></script>
-    <!-- The Nuvio shell bundle boots the whole home screen behind whatever is on
-         screen: /manifest.json, one request per catalog (local AND upstream) and
-         ~1.9s of main-thread long tasks. A deep link straight onto an overlay
-         (#addon / #configure / #settings) has no home screen to show, so the shell
-         is loaded the moment the overlay closes — see _syncOverlayFreeze() in app.js. -->
-    <script>
-      (function () {
-        var hash = String((window.location && window.location.hash) || "").toLowerCase();
-        var overlayBoot = hash === "#addon" || hash === "#configure" || hash === "#settings";
-        // Android 5.1's AOSP WebView (Chromium 39-44) cannot PARSE the shell bundle
-        // (async/await is Chrome 55): loading it turned the page into a boot-guard
-        // SyntaxError screen. Suppress it on those engines and let app.js land on
-        // #settings / #addon instead — the downloader UI is plain ES5.
-        var legacyEngine = !!(
-          window.NuvioBootGuard &&
-          window.NuvioBootGuard.engineTooOld &&
-          window.NuvioBootGuard.engineTooOld()
-        );
-        window.__pmShellBundleSuppressed = legacyEngine;
-        window.__pmLoadShellBundle = function () {
-          if (legacyEngine || window.__pmShellBundleLoaded) return;
-          window.__pmShellBundleLoaded = true;
-          var s = document.createElement("script");
-          s.src = "app.bundle.js?v=20261015pm15";
-          s.onerror = function () {
-            window.NuvioBootGuard && window.NuvioBootGuard.scriptFailed(s.src);
-          };
-          document.head.appendChild(s);
-        };
-        if (!overlayBoot && !legacyEngine) {
-          window.__pmLoadShellBundle();
-        }
-      })();
-    </script>
-    <script defer src="app.js?v=20261026removebot1"></script>
+    <script defer src="app.js?v=20261028dash21"></script>
+    <script defer src="dashboard.js?v=20261028dash24"></script>
   </body>
 </html>
