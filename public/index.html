@@ -15,7 +15,7 @@
     <link rel="stylesheet" href="styles.css?v=20261024music2" />
     <!-- last on purpose: the Titanium tokens must win over the legacy
          media-shell stylesheets for the relocated settings markup -->
-    <link rel="stylesheet" href="dashboard.css?v=20261028dash24" />
+    <link rel="stylesheet" href="dashboard.css?v=20261028dash26" />
     <link
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
@@ -170,6 +170,34 @@
               Update
             </button>
             <span class="pm-pill pm-pill--muted" id="dashHostPill"></span>
+            <!-- Ends the dashboard session: clears the pm_auth cookie through the
+                 server and the localStorage token `requestJson()` sends. Last in
+                 the row because it is the way out, not a status readout. -->
+            <button
+              type="button"
+              class="pm-pill pm-pill--muted pm-pill--logout"
+              id="logoutBtn"
+              title="Log out of this dashboard session"
+            >
+              <svg
+                class="pm-logout__icon"
+                viewBox="0 0 16 16"
+                width="12"
+                height="12"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path d="M9.5 2.5H12a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9.5" />
+                <path d="M6.5 11 9.5 8 6.5 5" />
+                <path d="M9.5 8h-7" />
+              </svg>
+              <span class="pm-logout__label">Log out</span>
+            </button>
           </div>
           <!-- The popover. Anchored to the status row, closed by \u00d7, Escape or a
                click outside; it never covers the page it is about. -->
@@ -1783,7 +1811,7 @@
     <!-- fetch / Object.entries / closest / AbortController for old WebViews
          (Android 5.1 = Chromium 39). No-ops on modern engines. -->
     <script src="assets/runtime/legacy-polyfills.js?v=20261009pm10"></script>
-    <script defer src="app.js?v=20261028dash21"></script>
+    <script defer src="app.js?v=20261028dash27"></script>
     <script defer src="dashboard.js?v=20261028dash25"></script>
   </body>
 </html>

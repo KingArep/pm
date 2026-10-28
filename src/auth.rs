@@ -379,6 +379,23 @@ pub fn auth_rotate_token() -> String {
     data.token.unwrap_or_default()
 }
 
+/// The `Set-Cookie` value for a freshly minted token.
+///
+/// Every route that rotates the token MUST send this. `auth_set_password()`,
+/// `auth_rotate_token()` and the reset path all replace the token in
+/// `auth.json`, and a client that keeps the old `pm_auth` cookie ends up
+/// half-authenticated: the cookie is dead, while the new token handed back in
+/// the JSON body still passes `is_authenticated()` through `X-Auth-Token`. The
+/// dashboard then opens with no password gate while every `/<old-token>/…`
+/// URL the player holds answers with the locked two-row body (issue #12).
+pub fn auth_cookie_header(ctx: &ReqCtx, token: &str) -> String {
+    let secure = if is_https_request(ctx) { "; Secure" } else { "" };
+    format!(
+        "pm_auth={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000{}",
+        token, secure
+    )
+}
+
 fn ct_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {

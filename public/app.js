@@ -472,7 +472,7 @@ class PencariMovieApp {
         this.showSettingsGate();
       });
     };
-    (_b = this.$("#logoutBtn")) == null ? void 0 : _b.addEventListener("click", afterLogout);
+    (_b = this.$("#logoutBtn")) == null ? void 0 : _b.addEventListener("click", () => this.logoutDashboard());
     (_c = this.$("#settingsDisconnectBtn")) == null ? void 0 : _c.addEventListener("click", afterLogout);
     (_d = this.$("#settingsClose")) == null ? void 0 : _d.addEventListener("click", () => {
       this.closeSettingsGate();
@@ -3072,6 +3072,50 @@ class PencariMovieApp {
       this._cacheClear();
     });
   }
+  /**
+   * End the DASHBOARD session.
+   *
+   * Two credentials say "this browser is in": the HttpOnly `pm_auth` cookie and
+   * the `pm.auth` localStorage copy that `requestJson()` sends as
+   * `X-Auth-Token`. Only the server can expire the cookie, so it goes through
+   * `/api/auth/logout`; the localStorage copy is cleared here. Leaving either
+   * one behind is what made a password change (which rotates the token) look
+   * like "the page opens without asking for the password, but nothing plays".
+   */
+  logoutDashboard() {
+    return __async(this, null, function* () {
+      const btn = this.$("#logoutBtn");
+      if (btn) btn.disabled = true;
+      try {
+        yield fetch("".concat(this.localApiBase, "/api/auth/logout"), {
+          method: "POST",
+          cache: "no-store"
+        });
+      } catch (error) {
+        console.warn("auth logout failed:", error);
+      }
+      this._authToken = "";
+      try {
+        localStorage.removeItem("pm.auth");
+      } catch (e) {}
+      // Loopback and LAN requests pass `is_authenticated()` without a password,
+      // so expiring the cookie alone left this machine's dashboard wide open and
+      // "Log out" looked dead. The flag holds the gate up for this tab until a
+      // password is entered again; a fresh tab asks the server as usual.
+      this._loggedOut = true;
+      try {
+        sessionStorage.setItem("pm.logged_out", "1");
+      } catch (e) {}
+      const addonTokenInput = this.$("#addonTokenInput");
+      if (addonTokenInput) addonTokenInput.value = "";
+      const pwInput = this.$("#authPasswordInput");
+      if (pwInput) pwInput.value = "";
+      const status = this.$("#authStatus");
+      if (status) status.textContent = "";
+      if (btn) btn.disabled = false;
+      this.showAuthGate();
+    });
+  }
   // ══════════════════════════════════════════════════════════════
   //  HELPERS
   // ══════════════════════════════════════════════════════════════
@@ -4123,6 +4167,16 @@ class PencariMovieApp {
    */
   checkAuth() {
     return __async(this, null, function* () {
+      let loggedOut = this._loggedOut === true;
+      if (!loggedOut) {
+        try {
+          loggedOut = sessionStorage.getItem("pm.logged_out") === "1";
+        } catch (e) {}
+      }
+      if (loggedOut) {
+        this.showAuthGate();
+        return false;
+      }
       try {
         const res = yield fetch("".concat(this.localApiBase, "/api/auth/status"), {
           cache: "no-store",
@@ -4138,6 +4192,15 @@ class PencariMovieApp {
           }
           this.hideAuthGate();
           return true;
+        }
+        // The server rejected what we sent, so the cached copy is dead weight:
+        // keeping it would re-send a rejected token on every request and, after
+        // a password change, hide the gate behind a token that no longer exists.
+        if (this._authToken) {
+          this._authToken = "";
+          try {
+            localStorage.removeItem("pm.auth");
+          } catch (e) {}
         }
         this.showAuthGate();
         return false;
@@ -4198,6 +4261,10 @@ class PencariMovieApp {
         if ((data == null ? void 0 : data.ok) && data.token) {
           this._authToken = data.token;
           localStorage.setItem("pm.auth", data.token);
+          this._loggedOut = false;
+          try {
+            sessionStorage.removeItem("pm.logged_out");
+          } catch (e) {}
           this.hideAuthGate();
           (_a = this._updateAddonModalUrls) == null ? void 0 : _a.call(this);
           const addonTokenInput = this.$("#addonTokenInput");

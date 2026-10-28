@@ -27,10 +27,10 @@ use axum::response::Response;
 use serde_json::Value;
 
 use crate::auth::{
-    ReqCtx, auth_client_ip, auth_enabled, auth_lockout_check, auth_privileged,
-    auth_record_failure, auth_record_success, auth_rotate_token, auth_set_password,
-    auth_token, auth_verify_password, is_authenticated, is_https_request, parse_cookies,
-    require_privileged, strip_token_prefix, url_host_is_public,
+    ReqCtx, auth_client_ip, auth_cookie_header, auth_enabled, auth_lockout_check, auth_privileged,
+    auth_record_failure, auth_record_success, auth_rotate_token, auth_set_password, auth_token,
+    auth_verify_password, is_authenticated, parse_cookies, require_privileged, strip_token_prefix,
+    url_host_is_public,
 };
 use crate::config::{AUTH_DEFAULT_PASSWORD, app_version, wp_api_base, wp_version_url};
 use crate::credentials::{clear_api_secret, get_api_secret};
@@ -307,13 +307,8 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
         }
         auth_record_success(&ip);
         let token = auth_token();
-        let secure = if is_https_request(&ctx) { "; Secure" } else { "" };
-        let cookie = format!(
-            "pm_auth={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000{}",
-            token, secure
-        );
         let mut resp = json_response(200, &serde_json::json!({"ok": 1, "token": token}));
-        if let Ok(v) = header::HeaderValue::from_str(&cookie) {
+        if let Ok(v) = header::HeaderValue::from_str(&auth_cookie_header(&ctx, &token)) {
             resp.headers_mut().insert(header::SET_COOKIE, v);
         }
         return resp;
@@ -342,14 +337,28 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
             );
         }
         auth_set_password(&next);
-        return json_response(200, &serde_json::json!({"ok": 1, "token": auth_token()}));
+        // The password change ROTATES the token. Re-issue the cookie in the same
+        // response or the browser keeps a dead `pm_auth` while the JSON body
+        // hands it a live `X-Auth-Token`: the gate never reappears, but every
+        // `/<old-token>/…` URL already installed in a player answers locked.
+        let token = auth_token();
+        let mut resp = json_response(200, &serde_json::json!({"ok": 1, "token": token}));
+        if let Ok(v) = header::HeaderValue::from_str(&auth_cookie_header(&ctx, &token)) {
+            resp.headers_mut().insert(header::SET_COOKIE, v);
+        }
+        return resp;
     }
 
     if p == "/api/auth/token/rotate" && m == "POST" {
         if let Some(resp) = require_privileged(&ctx) {
             return resp;
         }
-        return json_response(200, &serde_json::json!({"ok": 1, "token": auth_rotate_token()}));
+        let token = auth_rotate_token();
+        let mut resp = json_response(200, &serde_json::json!({"ok": 1, "token": token}));
+        if let Ok(v) = header::HeaderValue::from_str(&auth_cookie_header(&ctx, &token)) {
+            resp.headers_mut().insert(header::SET_COOKIE, v);
+        }
+        return resp;
     }
 
     if p == "/api/auth/reset" && m == "POST" {
@@ -358,7 +367,12 @@ pub async fn handle(state: Arc<AppState>, req: Request<Body>) -> Response {
         }
         auth_set_password(AUTH_DEFAULT_PASSWORD);
         let _ = std::fs::remove_file(storage_path("cache/auth_lockout.json"));
-        return json_response(200, &serde_json::json!({"ok": 1, "token": auth_token()}));
+        let token = auth_token();
+        let mut resp = json_response(200, &serde_json::json!({"ok": 1, "token": token}));
+        if let Ok(v) = header::HeaderValue::from_str(&auth_cookie_header(&ctx, &token)) {
+            resp.headers_mut().insert(header::SET_COOKIE, v);
+        }
+        return resp;
     }
 
     /* ── lightweight public routes (no version gate) ──────────────────────── */

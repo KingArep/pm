@@ -222,6 +222,65 @@ button.pm-pill:active {
   border-color: var(--pm-status-warn);
 }
 
+/* ── Log out ───────────────────────────────────────────────────── */
+/* Same pill chrome as the version and host readouts, so the status row keeps one
+   shape. Unlike them this one acts, so it earns a hover face and the danger
+   token on press — it is the only control in the header that ends something. */
+button.pm-pill--logout {
+  color: var(--pm-text-secondary);
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+button.pm-pill--logout:hover {
+  color: var(--pm-text-primary);
+  border-color: var(--pm-border-strong);
+  background: var(--pm-bg-surface-hover);
+}
+
+button.pm-pill--logout:active {
+  color: var(--pm-status-danger);
+  border-color: var(--pm-status-danger-border);
+  background: var(--pm-status-danger-bg);
+}
+
+/* Three channels, not opacity alone: the ink drops to muted, the fill and border
+   fall back to the resting pill, and the cursor says the request is in flight. */
+button.pm-pill--logout:disabled {
+  cursor: progress;
+  color: var(--pm-text-muted);
+  background: var(--pm-bg-subtle);
+  border-color: var(--pm-border-subtle);
+}
+
+.pm-logout__icon {
+  flex: 0 0 auto;
+  display: block;
+}
+
+/* Phones: the header already wraps its status row onto its own line, so the
+   icon alone carries the action. The label stays in the DOM (clipped) so the
+   button keeps its accessible name for screen readers. */
+@media (max-width: 560px) {
+  button.pm-pill--logout {
+    padding: 4px 8px;
+  }
+
+  button.pm-pill--logout .pm-logout__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+
 /* ── Update popover ────────────────────────────────────────────── */
 /* Anchored to the status row, so the header row must be the containing block. */
 .pm-header__inner {
