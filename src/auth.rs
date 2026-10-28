@@ -354,6 +354,20 @@ pub fn auth_enabled() -> bool {
     auth_load().enabled.unwrap_or(true)
 }
 
+/// True while the server still accepts the built-in default password.
+///
+/// Asking "is the stored hash empty" is wrong: the reset path stores a real
+/// hash of `AUTH_DEFAULT_PASSWORD` (`auth_set_password(AUTH_DEFAULT_PASSWORD)`),
+/// so an empty-hash test answered "no" while the dashboard still let `123456`
+/// in. This asks the verifier instead, which already handles `SERVER_PASSWORD`,
+/// salt+sha256 and bcrypt, so it is true for every route to the default.
+///
+/// `enabled: true` alone never meant somebody chose a password — that was the
+/// trap the dashboard checklist fell into. The row stays open while this is true.
+pub fn auth_uses_default_password() -> bool {
+    auth_verify_password(AUTH_DEFAULT_PASSWORD)
+}
+
 pub fn auth_token() -> String {
     auth_load().token.unwrap_or_default()
 }

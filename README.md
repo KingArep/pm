@@ -135,6 +135,21 @@ Deploy your personal PencariMovie Server to the cloud with a single click:
 > 💡 **Permanent Addon URL on Cloud / PaaS**:
 > Always set a static **`SERVER_TOKEN`** (e.g. `66ff097863dedb7ccd8401d5ffe616f2`) in your cloud provider's environment variables. This keeps your Stremio / Nuvio manifest URL (`https://<your-app>.up.railway.app/<token>/manifest.json`) permanent so you never need to re-install addons when your container restarts or redeploys.
 
+> ⚠️ **Heroku says "Unable to connect to aiskendi/pencarimovie-server — this repository is either private or does not exist"?**
+> The repository is public, so that message is wrong. Heroku's one-click flow asks GitHub about the repo with an **unauthenticated** request, and GitHub caps those at **60 requests/hour per IP**; when that call returns `403 rate limit exceeded` (or times out) Heroku displays the "private or does not exist" fallback. Nothing in this repo needs changing — pick either fix:
+>
+> 1. **Authorize GitHub in Heroku** (click _authenticate to continue_ on the error page, or Account Settings → Applications → Connect to GitHub) so Heroku's lookup is authenticated (5,000/hour), then reopen the button.
+> 2. **Skip the template** and push the same container build directly — this path is already live and never performs the template lookup:
+>
+> ```bash
+> heroku create <app-name> --stack container
+> heroku git:remote -a <app-name>
+> git push heroku main                          # heroku.yml builds the Dockerfile
+> heroku config:set SERVER_TOKEN=<32+ char secret>
+> ```
+>
+> Then `heroku open` (or `/api/version` for a liveness check).
+
 ---
 
 ## 🐳 Docker & Environment Variables
