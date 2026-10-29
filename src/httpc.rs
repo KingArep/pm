@@ -276,28 +276,39 @@ pub async fn http_json_h_status(
     static LAST_CLOCK_PROBE: std::sync::atomic::AtomicI64 =
         std::sync::atomic::AtomicI64::new(0);
     if status == 401 {
+        // Re-learn the clock BEFORE re-signing, in BOTH cases.
+        //
+        // A skewed clock is the one fault that makes an install look tokenless: a
+        // token minted with the ORIGIN's expiry is discarded by `auth_token()` the
+        // moment local time is past it, so `had_auth` is false on every request
+        // forever. Probing only when a token was sent meant the correction could
+        // never fire in exactly that state — the install re-enrolled once a minute,
+        // threw each token away, and logged nothing but 401s (issue #14).
+        let now_s = crate::storage::now();
+        let probe_due = now_s - LAST_CLOCK_PROBE.load(std::sync::atomic::Ordering::SeqCst) > 600;
+        if probe_due {
+            LAST_CLOCK_PROBE.store(now_s, std::sync::atomic::Ordering::SeqCst);
+            let probe = crate::session::measure_clock_offset().await;
+            if probe.ok {
+                crate::credentials::set_clock_offset(probe.offset);
+                log(
+                    "pm-auth clock corrected",
+                    &serde_json::json!({"offset_secs": probe.offset, "had_token": had_auth}),
+                );
+            }
+        }
         if had_auth {
             log("wp 401 with a token, re-enrolling", &serde_json::json!({"url": target}));
-            // Re-learn the clock before re-signing: a skewed clock makes every
-            // proof stale, so re-enrolling alone would mint a token we still
-            // cannot use.
-            let now_s = crate::storage::now();
-            if now_s - LAST_CLOCK_PROBE.load(std::sync::atomic::Ordering::SeqCst) > 600 {
-                LAST_CLOCK_PROBE.store(now_s, std::sync::atomic::Ordering::SeqCst);
-                let probe = crate::session::measure_clock_offset().await;
-                if probe.ok {
-                    crate::credentials::set_clock_offset(probe.offset);
-                    log(
-                        "pm-auth clock corrected",
-                        &serde_json::json!({"offset_secs": probe.offset}),
-                    );
-                }
-            }
             crate::credentials::clear_auth_token();
         } else {
+            // The reason is the whole point: "without a token" alone cannot tell a
+            // read-only volume from a clock that ate the token from a missing file.
             log(
                 "wp 401 without a token, enrolling",
-                &serde_json::json!({"url": target}),
+                &serde_json::json!({
+                    "url": target,
+                    "reason": crate::credentials::auth_token_reason(),
+                }),
             );
         }
         if crate::credentials::ensure_enrolled_throttled().await {
