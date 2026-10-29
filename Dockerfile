@@ -17,6 +17,7 @@
 FROM rust:1-alpine AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /src
+
 # Stamped into the binary by `build.rs`. The build context deliberately has no
 # `.git` and no tags, so `git describe` always fails there and the server falls
 # back to `CARGO_PKG_VERSION` — which is `0.1.0`, i.e. BELOW the origin's
@@ -26,10 +27,11 @@ WORKDIR /src
 # Empty is ignored by build.rs, so a plain `docker build` still works.
 ARG PM_BUILD_VERSION=
 ENV PM_BUILD_VERSION=${PM_BUILD_VERSION}
-# The crate IS the repo root: `src/assets.rs` embeds `public/` with include_dir!,
-# so the build context only needs the manifest, the sources and the dashboard.
+
+# The dashboard and Linux tray script are embedded into the binary.
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
+COPY desktop ./desktop
 COPY public ./public
 COPY desktop ./desktop
 # NO `--mount=type=cache` HERE. BuildKit cache mounts are the only way to keep the
@@ -38,14 +40,13 @@ COPY desktop ./desktop
 # build dead with:
 #
 #     Step 9/18 : RUN --mount=type=cache,target=/usr/local/cargo/registry ...
-#     the --mount option requires BuildKit.
+#     The --mount option requires BuildKit.
 #
-# "Deploy to Heroku" (dashboard.heroku.com/new?template=…) and every one-click
-# button use that classic builder, so cache mounts made the template undeployable
-# while the image-promotion path (`.github/workflows/deploy-heroku.yml`) kept
-# working, which is a confusing way to fail. A plain RUN costs a full recompile on
-# each source build and works everywhere. CI does not use this file: the release
-# pipeline builds `Dockerfile.release` (COPY-only, from a prebuilt musl binary).
+# "Deploy to Heroku" and every one-click button use that classic builder, so
+# cache mounts made the template undeployable. A plain RUN costs a full recompile
+# on each source build and works everywhere. CI does not use this file: the
+# release pipeline builds `Dockerfile.release` (COPY-only, from a prebuilt
+# musl binary).
 RUN cargo build --release --locked \
  && cp target/release/pencarimovie-server /usr/local/bin/pencarimovie-server
 
@@ -55,8 +56,6 @@ RUN apk add --no-cache ca-certificates tzdata curl \
  && mkdir -p /data \
  && chown -R 10001:10001 /data
 
-# The build stage copied the binary OUT of the cached target dir, because a cache
-# mount is not part of the image filesystem.
 COPY --from=build /usr/local/bin/pencarimovie-server /usr/local/bin/pencarimovie-server
 
 ENV PM_APP_ROOT=/data \

@@ -2160,7 +2160,12 @@ async fn handle_post_stream(
     let is_series = item_type.contains("series") || season > 0 || episode > 0;
     let (eff_season, eff_episode) = effective_season_episode(is_series, season, episode);
 
-    let post = crate::wp_data::get_post(&post_id).await;
+    // The post record and media-id index are independent origin lookups. Start
+    // both together so a cold click pays the slower request once, not twice.
+    let (post, row) = tokio::join!(
+        crate::wp_data::get_post(&post_id),
+        crate::wp_data::lookup_id("post", &post_id),
+    );
     let mut title = crate::wp_data::post_title(&post);
     let mut year = crate::wp_data::post_year(&post);
     // Step 2b: the `media_ids_idx` ROW is the fallback when the id is not a real
@@ -2168,7 +2173,6 @@ async fn handle_post_stream(
     // also carries the ALTERNATE title — which is exactly what makes
     // "Khurafat: Perjanjian Syaitan" playable while the origin indexes it as
     // "Superstition" (backend.php's AKA chain).
-    let row = crate::wp_data::lookup_id("post", &post_id).await;
     if title.is_empty() {
         title = jstr(&row, "title");
     }
@@ -2468,12 +2472,48 @@ async fn resolve_episode_files_with(
     // reject a file that names ANOTHER show's episode after this episode's marker
     // (the sibling-work case). An empty list means "no evidence", and the guard
     // then fails OPEN, so this can never hide a stream on its own.
-    let episode_names: Vec<String> = if imdb_id.trim().is_empty() {
-        Vec::new()
-    } else {
-        let settings = load_catalog_settings_merged();
-        upstream::episode_names(&settings, imdb_id, season, episode, &title, &year).await
+    // These three reads are independent once the post/title/id are known. Run
+    // them together so source discovery waits for the slowest origin, not the
+    // sum of metadata, post-file and episode-index latencies.
+    let episode_names_future = async {
+        if imdb_id.trim().is_empty() {
+            Vec::new()
+        } else {
+            let settings = load_catalog_settings_merged();
+            upstream::episode_names(&settings, imdb_id, season, episode, &title, &year).await
+        }
     };
+    let post_files_future = async {
+        if has_post {
+            crate::wp_data::fetch_post_files_paged(post_id, 200, 600, 3).await
+        } else {
+            Vec::new()
+        }
+    };
+    let episode_index_id = if has_post {
+        format!("post:{}", post_id)
+    } else {
+        external_id.to_string()
+    };
+    let episode_index_future = async {
+        if has_post || !external_id.is_empty() {
+            Some(crate::wp_data::stream_files_episode(
+                "series",
+                &keyword,
+                &episode_index_id,
+                season,
+                episode,
+                MAX_FILES,
+            ).await)
+        } else {
+            None
+        }
+    };
+    let (episode_names, post_files, more) = tokio::join!(
+        episode_names_future,
+        post_files_future,
+        episode_index_future,
+    );
 
     // ── 0a. what the caller already resolved ─────────────────────────────────
     // On the external route this is the title search. It runs through `$add()`
@@ -2501,11 +2541,6 @@ async fn resolve_episode_files_with(
     }
 
     // ── 0. the post's own file set ───────────────────────────────────────────
-    let post_files = if has_post {
-        crate::wp_data::fetch_post_files_paged(post_id, 200, 600, 3).await
-    } else {
-        Vec::new()
-    };
     if !post_files.is_empty() {
         if year.is_empty() {
             if let Some(derived) = crate::wp_data::derive_year_from_files(&post_files) {
@@ -2542,24 +2577,8 @@ async fn resolve_episode_files_with(
 
     // ── 1. the per-episode index search ──────────────────────────────────────
     let mut fast_path_done = false;
+    let more = more.unwrap_or_default();
     if all.len() < MAX_FILES && (has_post || !external_id.is_empty()) {
-        // The origin resolves the identity from this `id`. With a post it is
-        // `post:<id>`; on the external route it is the `tt…`/`tmdb:…` id itself
-        // — the PHP's `'id' => $itemId` (backend.php:17096).
-        let id_param = if has_post {
-            format!("post:{}", post_id)
-        } else {
-            external_id.to_string()
-        };
-        let more = crate::wp_data::stream_files_episode(
-            "series",
-            &keyword,
-            &id_param,
-            season,
-            episode,
-            MAX_FILES,
-        )
-        .await;
         if more.ok {
             fast_path_done = true;
             if title.is_empty() && !more.resolved_title.is_empty() {
