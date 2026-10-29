@@ -39,6 +39,15 @@ docker compose up -d` in a code block for a container, "install the newest APK" 
 
 ### Fixed
 
+- **Saving catalog settings can no longer blank the configuration.**
+  `write_catalog_settings()` truncated `storage/catalog_settings.json` with `fs::write` before
+  filling it, while `read_catalog_settings()` sits on the config path of every `/catalog`,
+  `/meta`, `/stream` and `/api/settings` request: a reader inside that window parsed an empty
+  file, and the catalog rows, upstream manifests and stream filters all silently fell back to
+  the `PM_CATALOG_SETTINGS` env layer alone. A failed encode was mapped to `{}` as well, so a
+  serialization error wiped the file and still answered `ok: 1`. It now writes
+  `catalog_settings.json.tmp` and renames over the target (the same pattern, and the same
+  reason, as `save_auth_token()`), and writes nothing at all when the encode fails.
 - **`can_apply` is no longer frozen inside the update cache.** `update::check()` memorises
   the feed answer for an hour, and `can_apply` / `apply_blocked_reason` / `apply_hint` were
   part of that body, so a freshly extracted release kept answering `no_script` (no "Update
