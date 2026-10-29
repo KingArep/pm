@@ -289,12 +289,87 @@ pub fn auth_token() -> String {
     token
 }
 
-pub fn save_auth_token(token: &str, expires_at: i64) {
+/// Returns false when the token could not be stored.
+///
+/// The result used to be discarded, and that is what made a whole class of
+/// unplayable installs silent (issue #14): an unwritable `storage/`, a
+/// uid-mismatched `auth_token.json`, or a full disk made every enrolment a
+/// no-op while `ensure_enrolled()` still answered "enrolled", so the engine
+/// re-enrolled once a minute forever, sent every origin call with NO credential,
+/// and logged only `wp 401 without a token` — never the reason.
+pub fn save_auth_token(token: &str, expires_at: i64) -> bool {
     if token.is_empty() {
-        return;
+        return false;
     }
+    let path = auth_token_path();
     let body = serde_json::json!({"token": token, "expires_at": expires_at});
-    let _ = std::fs::write(auth_token_path(), body.to_string());
+    // Write beside the target, then rename over it. `fs::write` truncates first,
+    // so a concurrent `auth_token()` (boot enrolment, the 401 path, the download
+    // path and the music pre-warm all read it) could see an EMPTY file, answer
+    // "", and send an unauthenticated request that 401s — the very flap this
+    // function exists to make visible. Rename is atomic on both NTFS and POSIX.
+    let tmp = path.with_file_name("auth_token.json.tmp");
+    if let Err(e) = std::fs::write(&tmp, body.to_string()) {
+        crate::log::stderr_log(
+            "pm-auth token write failed - this install cannot authenticate until storage is writable",
+            Some(&serde_json::json!({
+                "path": path.display().to_string(),
+                "error": e.to_string(),
+            })),
+        );
+        return false;
+    }
+    match std::fs::rename(&tmp, &path) {
+        Ok(()) => true,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            crate::log::stderr_log(
+                "pm-auth token write failed - this install cannot authenticate until storage is writable",
+                Some(&serde_json::json!({
+                    "path": path.display().to_string(),
+                    "error": e.to_string(),
+                })),
+            );
+            false
+        }
+    }
+}
+
+/// Why [`auth_token()`] answered what it did — for the 401 path and diagnostics.
+///
+/// Issue #14 was undiagnosable from the log alone: `wp 401 without a token`
+/// never said whether the file was missing, the write had failed, the expiry had
+/// already passed when it was minted (a host clock ahead of the origin), or the
+/// origin had answered no expiry at all. This makes the answer explicit.
+pub fn auth_token_reason() -> String {
+    let path = auth_token_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => return format!("unreadable {}: {e}", path.display()),
+    };
+    let v: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => return format!("{} is not JSON: {e}", path.display()),
+    };
+    let token = v
+        .get("token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return format!("{} holds no token", path.display());
+    }
+    let exp = v.get("expires_at").and_then(|x| x.as_i64()).unwrap_or(0);
+    let now = crate::storage::now();
+    if exp <= now + 60 {
+        return format!(
+            "token already expired: expires_at={exp} local_now={now} expired_{}s_ago clock_offset={}",
+            now.saturating_sub(exp),
+            clock_offset()
+        );
+    }
+    format!("token valid for {}s", exp - now)
 }
 
 pub fn clear_auth_token() {
@@ -399,7 +474,25 @@ pub async fn ensure_enrolled() -> bool {
         );
         return false;
     }
-    save_auth_token(token, expires_at);
+    // Trust what we can READ BACK, not what the origin promised. A POST that
+    // succeeds while the token never lands on disk (read-only volume, a
+    // uid-mismatched `auth_token.json`, a full disk) or whose expiry is already
+    // past (host clock ahead of the origin by more than the 60-minute TTL) leaves
+    // this install exactly as unauthenticated as before — and silently so, which
+    // is what issue #14 could only describe as "all resolver calls 401".
+    if !save_auth_token(token, expires_at) || auth_token().is_empty() {
+        crate::log::stderr_log(
+            "pm-auth enrol could not produce a usable token",
+            Some(&serde_json::json!({
+                "path": auth_token_path().display().to_string(),
+                "reason": auth_token_reason(),
+                "origin_expires_at": expires_at,
+                "local_now": crate::storage::now(),
+                "clock_offset": clock_offset(),
+            })),
+        );
+        return false;
+    }
     true
 }
 
@@ -642,6 +735,43 @@ mod provision_tests {
         // 64-byte Ed25519 signature -> 86 base64url chars.
         assert_eq!(headers[4].1.len(), 86);
         assert_eq!(headers[0].1, "v1.dummy.claims");
+    }
+
+    /// Issue #14: an enrolment whose token never reaches the disk must NOT report
+    /// success.
+    ///
+    /// `auth_token.json` is a directory here, which is the portable stand-in for
+    /// the real faults: a read-only volume, a file owned by another uid, a full
+    /// disk, or an expiry the host clock had already passed. Before this was
+    /// pinned, the engine answered `enrolled:true` for all of them, sent every
+    /// origin call with no credential, and logged only `wp 401 without a token`.
+    #[test]
+    fn a_token_that_cannot_be_stored_is_reported_as_a_failure() {
+        let _guard = token_file_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let path = auth_token_path();
+        let previous = std::fs::read(&path).ok();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("make auth_token.json unwritable");
+
+        let stored = save_auth_token("v1.unpersistable", crate::storage::now() + 3600);
+        let live = auth_token();
+        let reason = auth_token_reason();
+
+        let _ = std::fs::remove_dir_all(&path);
+        match previous {
+            Some(bytes) => {
+                let _ = std::fs::write(&path, bytes);
+            }
+            None => clear_auth_token(),
+        }
+
+        assert!(!stored, "a token that never reached the disk must not report success");
+        assert!(live.is_empty(), "auth_token() must not answer a token it cannot read");
+        assert!(
+            reason.contains("unreadable"),
+            "the 401 log must name the real reason, got: {reason}"
+        );
     }
 
     /// The shipping header wrapper: exactly five headers when a token is held,

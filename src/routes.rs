@@ -4259,12 +4259,38 @@ fn merge_settings_layers(env_layer: Option<Value>, file_layer: Option<Value>) ->
     base
 }
 
+/// Persist `storage/catalog_settings.json`, beside-then-rename.
+///
+/// Two silent faults in the plain `fs::write` this replaces:
+///
+/// * It truncated before writing, while [`read_catalog_settings()`] sits on the
+///   config path of every `/catalog`, `/meta`, `/stream` and `/api/settings`
+///   request. A reader inside that window saw an EMPTY file, `from_str` failed,
+///   and the whole configuration — catalog rows, upstream manifests, stream
+///   filters — silently answered with the `PM_CATALOG_SETTINGS` env layer alone.
+/// * A serialization failure was mapped to `"{}"`, i.e. it WIPED the file and
+///   still reported success. A failed encode must write nothing at all.
+///
+/// `rename` is atomic on both NTFS and POSIX; same pattern (and same reason) as
+/// [`crate::credentials::save_auth_token`]. `storage/` is untracked, so the
+/// `.tmp` is only ever a transient.
 fn write_catalog_settings(data: &Value) -> bool {
-    std::fs::write(
-        storage_path("catalog_settings.json"),
-        serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".to_string()),
-    )
-    .is_ok()
+    let Ok(body) = serde_json::to_string_pretty(data) else {
+        return false;
+    };
+    let path = storage_path("catalog_settings.json");
+    let tmp = path.with_file_name("catalog_settings.json.tmp");
+    if std::fs::write(&tmp, body).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    match std::fs::rename(&tmp, &path) {
+        Ok(()) => true,
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+            false
+        }
+    }
 }
 
 /// `fd_get_default_catalog_options()` (backend.php:11743) — an **id → info map**,
