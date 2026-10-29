@@ -217,18 +217,33 @@ fn apply_blocked_reason(asset: Option<&str>) -> &'static str {
 const CONTAINER_HINT: &str =
     "This server runs in a container, so it updates by pulling a new image — run `docker compose pull && docker compose up -d` (or redeploy the service) instead of replacing the binary.";
 
+/// Cache row for one `(branch, version)` question.
+///
+/// The payload embeds the version it compared (`current`, `current_display`) and
+/// the verdict derived from it (`update_available`), and L2 lives on disk
+/// (`storage/cache/cache.redb`), so it outlives a restart. Keyed by branch alone,
+/// the answer built before an upgrade answered the process that replaced it:
+/// installed `1.0.99` asked, cached "1.0.100 is available", the APK install
+/// restarted the engine as `1.0.100`, and `/api/update/check` kept reporting
+/// `current: 1.0.99, update_available: true` for the rest of the hour — the
+/// dashboard pill said "Update v1.0.100" to a phone already running 1.0.100.
+fn check_cache_key(app_managed: bool, current: &str) -> String {
+    let branch = if app_managed {
+        "check_android"
+    } else {
+        "check_desktop"
+    };
+    format!("{branch}@{}", current.trim().trim_start_matches('v'))
+}
+
 /// `GET /api/update/check` — never downloads anything.
 pub async fn check() -> Value {
     let current = config::app_version();
     let client = config::client_version();
     let is_android = app_managed_for(&client);
-    let cache_key = if is_android {
-        "check_android"
-    } else {
-        "check_desktop"
-    };
+    let cache_key = check_cache_key(is_android, &current);
 
-    if let Some(hit) = crate::cache::get("update", cache_key) {
+    if let Some(hit) = crate::cache::get("update", &cache_key) {
         let mut v = (*hit).clone();
         // The FEED answer (latest tag, asset name, notes link) is worth caching for
         // an hour. Whether THIS host may replace itself is not: it depends on the
@@ -268,7 +283,7 @@ pub async fn check() -> Value {
         } else {
             300
         };
-        crate::cache::put("update", cache_key, &res, ttl, 0);
+        crate::cache::put("update", &cache_key, &res, ttl, 0);
         return res;
     }
 
@@ -295,7 +310,7 @@ pub async fn check() -> Value {
                 "error": "Could not reach the release feed. Check this machine's network, then retry.",
             })
         };
-        crate::cache::put("update", cache_key, &res, 300, 0);
+        crate::cache::put("update", &cache_key, &res, 300, 0);
         return res;
     }
     let latest = release
@@ -311,7 +326,7 @@ pub async fn check() -> Value {
             "latest": latest,
             "error": "No update artifact is published for this platform.",
         });
-        crate::cache::put("update", cache_key, &res, 3600, 0);
+        crate::cache::put("update", &cache_key, &res, 3600, 0);
         return res;
     };
     let asset = asset_of(&release, &format!("pencarimovie-server-{key}.tar.gz"));
@@ -337,7 +352,7 @@ pub async fn check() -> Value {
         "notes_url": release.get("html_url").and_then(|v| v.as_str()).unwrap_or(""),
         "releases_url": releases_url(),
     });
-    crate::cache::put("update", cache_key, &res, 3600, 0);
+    crate::cache::put("update", &cache_key, &res, 3600, 0);
     res
 }
 
@@ -494,6 +509,22 @@ mod tests {
         assert!(is_newer("v2.8.9", "2.8.8-5-gabc"));
         assert!(!is_newer("v2.8.8", "2.8.8-5-gabc"));
         assert!(!is_newer("v2.7.9", "2.8.0"));
+    }
+
+    #[test]
+    fn the_answer_is_not_reused_across_a_version_change() {
+        // The cached payload EMBEDS the version it compared (`current`) and the
+        // verdict derived from it (`update_available`), and L2 (`storage/cache/
+        // cache.redb`) outlives a restart. Installed 1.0.99 asked, got "1.0.100 is
+        // available", the APK install restarted the engine as 1.0.100 — and the
+        // pre-upgrade row kept answering "update to 1.0.100" for the rest of the
+        // hour. The key must name the version, so the upgraded process asks again.
+        assert_ne!(check_cache_key(true, "1.0.99"), check_cache_key(true, "1.0.100"));
+        assert_ne!(check_cache_key(false, "3.0.2"), check_cache_key(false, "3.0.3"));
+        // A v-prefixed / padded spelling of the same version is the same question.
+        assert_eq!(check_cache_key(true, "v1.0.100"), check_cache_key(true, "1.0.100"));
+        // Desktop and app-shell answers never share a row either.
+        assert_ne!(check_cache_key(true, "1.0.100"), check_cache_key(false, "1.0.100"));
     }
 
     #[test]
