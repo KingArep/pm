@@ -406,3 +406,24 @@ PARITY.md
 PORT_GAPS.md
 COVERAGE.md
 CROSS-PLATFORM.md
+
+# ---------------------------------------------------------------------------
+# Root-level scratch: probe output, sample downloads and one-off analysis
+# scripts. None of it is part of the engine, and none of it belongs in a clone.
+# ---------------------------------------------------------------------------
+/tmp_*
+/test_*.bin
+/test_*.py
+/.codegraph/
+/chunk.bin
+/real_media.bin
+/probe_*.json
+/probe_entries.txt
+/search.json
+/stream.json
+/out.json
+/_phpmf.json
+/heroku_logs.txt
+/analyze_h12.js
+/analyze_h12.mjs
+/resolved

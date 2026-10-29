@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en" class="no-flex-gap no-css-grid no-css-math no-backdrop-filter no-aspect-ratio">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#141414" />
+    <title>PencariMovie — Stream & Download</title>
+    <link rel="icon" type="image/png" href="logo.png?v=20261021b" />
+    <link rel="apple-touch-icon" href="logo.png?v=20261021b" />
+    <link rel="stylesheet" href="stream-theme.css?v=20261009pm10" />
+    <link rel="stylesheet" href="styles.css?v=20261024music2" />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+    />
+    <link rel="stylesheet" href="css/bundle.css?v=20261009pm10" />
+    <script src="assets/runtime/legacy-features.js?v=20261009pm10"></script>
+    <!-- The "Dashboard" exit pill that used to sit here is gone: the player is
+         opened from the dashboard and the browser Back button already returns
+         there, so the pill was a second, competing way out. -->
+      <!-- Titanium tokens and overlay overrides for the three gates. Appended
+         here, not in a shared sheet, so the media shell keeps its own theme. -->
+    <style id="pmGateTheme">
+      :root {
+        --pm-bg-canvas: #0b0c10;
+        --pm-bg-surface: #13161f;
+        --pm-bg-surface-elevated: #1a1e2b;
+        --pm-bg-surface-hover: #222738;
+        --pm-bg-subtle: rgba(255, 255, 255, 0.04);
+        --pm-border-subtle: rgba(255, 255, 255, 0.08);
+        --pm-border-strong: rgba(255, 255, 255, 0.16);
+        --pm-border-focus: #e2e8f0;
+        --pm-text-primary: #f8fafc;
+        --pm-text-secondary: #94a3b8;
+        --pm-text-muted: #64748b;
+        --pm-text-inverse: #0b0c10;
+        --pm-accent: #e2e8f0;
+        --pm-accent-hover: #ffffff;
+        --pm-status-online: #10b981;
+        --pm-status-online-bg: rgba(16, 185, 129, 0.12);
+        --pm-status-warn: #f59e0b;
+        --pm-status-danger: #ef4444;
+        --pm-status-danger-bg: rgba(239, 68, 68, 0.12);
+        --pm-status-danger-border: rgba(239, 68, 68, 0.45);
+        --pm-radius-sm: 6px;
+        --pm-radius-md: 10px;
+        --pm-radius-lg: 14px;
+        --pm-radius-full: 9999px;
+      }
+
+      .settings-gate {
+        background: rgba(11, 12, 16, 0.88);
+      }
+
+      .settings-gate__card {
+        background: var(--pm-bg-surface);
+        border: 1px solid var(--pm-border-strong);
+        border-radius: var(--pm-radius-lg);
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+      }
+
+      .settings-gate__title,
+      .settings-gate__bots-title,
+      .addon-catalog-card__title,
+      .addon-stremio-sync__title {
+        color: var(--pm-text-primary);
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .settings-gate__desc,
+      .settings-gate__tunnel-desc,
+      .addon-stremio-sync__desc {
+        color: var(--pm-text-secondary);
+      }
+
+      .settings-gate__desc a,
+      .settings-gate__addon-link,
+      .addon-catalog-link-btn,
+      .settings-gate__link {
+        color: var(--pm-accent);
+        text-decoration-color: var(--pm-border-strong);
+      }
+
+      .settings-gate__tunnel-desc code,
+      .addon-stremio-sync__hint code {
+        color: var(--pm-text-primary);
+        background: var(--pm-bg-subtle);
+        border-radius: 4px;
+        padding: 1px 5px;
+      }
+
+      .settings-gate__input,
+      .addon-country-select {
+        background: var(--pm-bg-surface-elevated);
+        border: 1px solid var(--pm-border-subtle);
+        border-radius: var(--pm-radius-md);
+        color: var(--pm-text-primary);
+      }
+
+      .settings-gate__input:focus,
+      .addon-country-select:focus {
+        border-color: var(--pm-border-focus);
+        box-shadow: none;
+        outline: 2px solid var(--pm-border-focus);
+        outline-offset: 2px;
+      }
+
+      .settings-gate__btn,
+      #settingsDisconnectBtn,
+      #diagSelfTestBtn,
+      #diagReportBtn {
+        background: var(--pm-bg-surface-elevated);
+        border: 1px solid var(--pm-border-subtle);
+        border-radius: var(--pm-radius-md);
+        color: var(--pm-text-primary);
+        font-weight: 500;
+      }
+
+      .settings-gate__btn:hover {
+        background: var(--pm-bg-surface-hover);
+        border-color: var(--pm-border-strong);
+      }
+
+      #connectBtn,
+      #changePwBtn,
+      #submitAddBotsBtn {
+        background: var(--pm-accent);
+        border-color: var(--pm-accent);
+        color: var(--pm-text-inverse);
+        font-weight: 600;
+      }
+
+      #settingsDisconnectBtn,
+      #disableTunnelBtn {
+        background: var(--pm-status-danger-bg);
+        border-color: var(--pm-status-danger-border);
+        color: var(--pm-status-danger);
+      }
+
+      .settings-gate__status { color: var(--pm-text-secondary); }
+      .settings-gate__status.ok { color: var(--pm-status-online); }
+      .settings-gate__status.error,
+      .settings-gate__status.err { color: var(--pm-status-danger); }
+
+      .settings-gate__field,
+      .settings-gate__addon-box,
+      .settings-gate__bots-container,
+      .addon-catalog-card,
+      .addon-stremio-sync {
+        background: var(--pm-bg-surface-elevated);
+        border: 1px solid var(--pm-border-subtle);
+        border-radius: var(--pm-radius-md);
+      }
+
+      .settings-gate__version-badge,
+      .addon-catalog-card__badge {
+        background: var(--pm-bg-subtle);
+        border: 1px solid var(--pm-border-subtle);
+        color: var(--pm-text-secondary);
+      }
+
+      .settings-gate__btn:focus-visible,
+      .settings-gate__input:focus-visible,
+      .settings-gate__link:focus-visible,
+      .addon-catalog-link-btn:focus-visible {
+        outline: 2px solid var(--pm-border-focus);
+        outline-offset: 2px;
+      }
+
+      /* ── The player watches; the dashboard configures ────────────────
+         The shell's sidebar entries are built as
+         <button class="home-nav-item" data-action="gotoAddon" …>, so the
+         action is the stable hook. The overlays behind them are gone from
+         this page, so leaving the entries would open a dead route. */
+      [data-action="gotoAddon"],
+      [data-action="gotoPlugin"],
+      [data-action="gotoSettings"] {
+        display: none !important;
+      }
+
+      /* ── No amber in the player ──────────────────────────────────────
+         The shell injects these from its theme object at runtime, which
+         lands as an inline style on the root, so !important is required to
+         outrank it. Selection and focus now read as neutral light. */
+      :root {
+        --accent: #e2e8f0 !important;
+        --accent-hover: #ffffff !important;
+        --secondary-color: #e2e8f0 !important;
+        --focus-color: #e2e8f0 !important;
+        --secondary-color-rgb: 226, 232, 240 !important;
+      }
+
+      /* Literal amber left in the shell stylesheet. */
+      .app-route-progress-bar.active {
+        background: var(--pm-accent) !important;
+        background-image: none !important;
+      }
+
+      .stream-route-stream-badge.quality,
+      .stream-route-stream-badge.visual {
+        background: var(--pm-bg-subtle) !important;
+        border-color: var(--pm-border-subtle) !important;
+        color: var(--pm-text-secondary) !important;
+      }
+    </style>
+  </head>
+  <body class="stream-dark">
+    <!-- ─── Loading Screen (shown during session check) ───────── -->
+    <div id="loadingScreen" class="loading-screen" aria-hidden="false">
+      <div class="loading-screen__spinner"></div>
+      <p class="loading-screen__text"></p>
+    </div>
+    <!-- The pre-boot script that used to pre-open #addonModal / #settingsGate
+         for an overlay deep link is gone with those overlays. -->
+
+    <!-- The update notice was removed: updates are reported on the dashboard. -->
+    
+
+    <!-- ─── Fatal Error Overlay (missing dependency / unsupported OS) ── -->
+    <div id="fatalErrorOverlay" class="fatal-error hidden" aria-hidden="true">
+      <div class="fatal-error__card">
+        <div class="fatal-error__icon">&#x26A0;&#xFE0F;</div>
+        <h2 class="fatal-error__title">PencariMovie Server cannot start</h2>
+        <p class="fatal-error__desc">
+          The server is missing a required component or is running on an
+          unsupported platform. Entering a bot token will not fix this.
+        </p>
+        <ul id="fatalErrorProblems" class="fatal-error__list"></ul>
+        <div id="fatalErrorHints" class="fatal-error__hints"></div>
+        <button id="fatalErrorRetry" class="fatal-error__btn">Retry</button>
+      </div>
+    </div>
+
+    <!-- ─── Auth Gate (server password) ────────────────────────── -->
+    <div id="authGate" class="settings-gate hidden" aria-hidden="true">
+      <div class="settings-gate__card">
+        <h2 class="settings-gate__title">PencariMovie Server</h2>
+        <div
+          class="settings-gate__notice"
+          style="
+            margin-top: 16px;
+            padding: 12px 14px;
+            background: var(--pm-bg-subtle);
+            border: 1px solid var(--pm-border-subtle);
+            border-radius: 8px;
+            font-size: 0.82rem;
+            color: var(--pm-text-secondary);
+            line-height: 1.5;
+            text-align: left;
+          "
+        >
+          PencariMovie Server is free. We do not sell access or subscriptions. If this
+          is not your personal server, you can run your own at no cost on any device
+          (phone, PC, TV, VPS, cloud) with the installer from
+          <a
+            href="https://telegra.my"
+            target="_blank"
+            rel="noopener"
+            style="color: var(--accent, var(--pm-accent)); font-weight: 600; text-decoration: underline"
+            >telegra.my</a
+          >.
+        </div>
+
+        <details id="authDetails" class="settings-gate__details">
+          <summary
+            id="authSummary"
+            class="settings-gate__summary"
+            tabindex="0"
+          >
+            Server owner? Click to enter password
+          </summary>
+          <div style="margin-top: 14px">
+            <p class="settings-gate__desc" style="margin-bottom: 12px; font-size: 0.82rem; color: var(--pm-text-muted);">
+              Enter server password to continue. (Default: <code>123456</code>)
+            </p>
+            <div class="settings-gate__field">
+              <label class="settings-gate__label" for="authPasswordInput"
+                >Server Password</label
+              >
+              <input
+                type="password"
+                id="authPasswordInput"
+                class="settings-gate__input"
+                placeholder="Password"
+                autocomplete="current-password"
+              />
+            </div>
+            <button id="authConnectBtn" class="settings-gate__btn" style="width: 100%">Connect</button>
+            <div id="authStatus" class="settings-gate__status"></div>
+          </div>
+        </details>
+      </div>
+    </div>
+
+    <!-- The bot-login gate was removed: configuration lives on the dashboard. -->
+    
+
+    <!-- The addon modal was removed: configuration lives on the dashboard. -->
+    
+
+    <!-- ─── Core JS and Nuvio Shell ───────────────────────────── -->
+    <script src="boot-guard.js?v=20261009pm10"></script>
+    <!-- fetch / Object.entries / closest / AbortController for old WebViews
+         (Android 5.1 = Chromium 39). No-ops on modern engines. -->
+    <script src="assets/runtime/legacy-polyfills.js?v=20261009pm10"></script>
+    <script
+      defer
+      src="core-js.bundle.js?v=20261009pm10"
+      onerror="window.NuvioBootGuard && window.NuvioBootGuard.scriptFailed(this.src)"
+    ></script>
+    <script defer src="nuvio.env.js?v=20261009pm10"></script>
+    <script defer src="assets/libs/qrcode-generator.js?v=20261009pm10"></script>
+    <!-- The Nuvio shell bundle boots the whole home screen behind whatever is on
+         screen: /manifest.json, one request per catalog (local AND upstream) and
+         ~1.9s of main-thread long tasks. A deep link straight onto an overlay
+         (#addon / #configure / #settings) has no home screen to show, so the shell
+         is loaded the moment the overlay closes — see _syncOverlayFreeze() in app.js. -->
+    <script>
+      (function () {
+        // No overlay deep links any more — the gates are gone from this page —
+        // so every arrival boots the shell. A hash-based skip here would leave a
+        // blank page for anyone landing on /nuvio.html#settings.
+        // Android 5.1's AOSP WebView (Chromium 39-44) cannot PARSE the shell bundle
+        // (async/await is Chrome 55): loading it turned the page into a boot-guard
+        // SyntaxError screen. Suppress it on those engines and let app.js land on
+        // #settings / #addon instead — the downloader UI is plain ES5.
+        var legacyEngine = !!(
+          window.NuvioBootGuard &&
+          window.NuvioBootGuard.engineTooOld &&
+          window.NuvioBootGuard.engineTooOld()
+        );
+        window.__pmShellBundleSuppressed = legacyEngine;
+        window.__pmLoadShellBundle = function () {
+          if (legacyEngine || window.__pmShellBundleLoaded) return;
+          window.__pmShellBundleLoaded = true;
+          var s = document.createElement("script");
+          s.src = "app.bundle.js?v=20261015pm15";
+          s.onerror = function () {
+            window.NuvioBootGuard && window.NuvioBootGuard.scriptFailed(s.src);
+          };
+          document.head.appendChild(s);
+        };
+        if (!legacyEngine) {
+          window.__pmLoadShellBundle();
+        }
+      })();
+    </script>
+    <script defer src="app.js?v=20261028dash18"></script>
+  </body>
+</html>

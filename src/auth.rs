@@ -354,6 +354,20 @@ pub fn auth_enabled() -> bool {
     auth_load().enabled.unwrap_or(true)
 }
 
+/// True while the server still accepts the built-in default password.
+///
+/// Asking "is the stored hash empty" is wrong: the reset path stores a real
+/// hash of `AUTH_DEFAULT_PASSWORD` (`auth_set_password(AUTH_DEFAULT_PASSWORD)`),
+/// so an empty-hash test answered "no" while the dashboard still let `123456`
+/// in. This asks the verifier instead, which already handles `SERVER_PASSWORD`,
+/// salt+sha256 and bcrypt, so it is true for every route to the default.
+///
+/// `enabled: true` alone never meant somebody chose a password — that was the
+/// trap the dashboard checklist fell into. The row stays open while this is true.
+pub fn auth_uses_default_password() -> bool {
+    auth_verify_password(AUTH_DEFAULT_PASSWORD)
+}
+
 pub fn auth_token() -> String {
     auth_load().token.unwrap_or_default()
 }
@@ -363,6 +377,23 @@ pub fn auth_rotate_token() -> String {
     data.token = Some(random_hex(16));
     auth_save(&data);
     data.token.unwrap_or_default()
+}
+
+/// The `Set-Cookie` value for a freshly minted token.
+///
+/// Every route that rotates the token MUST send this. `auth_set_password()`,
+/// `auth_rotate_token()` and the reset path all replace the token in
+/// `auth.json`, and a client that keeps the old `pm_auth` cookie ends up
+/// half-authenticated: the cookie is dead, while the new token handed back in
+/// the JSON body still passes `is_authenticated()` through `X-Auth-Token`. The
+/// dashboard then opens with no password gate while every `/<old-token>/…`
+/// URL the player holds answers with the locked two-row body (issue #12).
+pub fn auth_cookie_header(ctx: &ReqCtx, token: &str) -> String {
+    let secure = if is_https_request(ctx) { "; Secure" } else { "" };
+    format!(
+        "pm_auth={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000{}",
+        token, secure
+    )
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {

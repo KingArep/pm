@@ -4,7 +4,55 @@ All notable changes to the PencariMovie Server / Downloader project will be docu
 
 ## [Unreleased]
 
+### Added
+
+- **The dashboard header shows an update when the release feed has one.** A pill sits next
+  to the version, and only when `/api/update/check` reports `update_available`: it opens a
+  small card naming the path that works on that host — "Update now" (`POST
+/api/update/apply`) for a binary that can replace itself, `docker compose pull &&
+docker compose up -d` in a code block for a container, "install the newest APK" for an
+  app-managed build, and the release page for a manual install. `/api/update/check` is the
+  only source; `/api/version`'s `update_needed` comes from the WordPress plugin's PHP-era
+  `min_version` and reported "no update" while GitHub already had `v3.0.3`. Versioning
+  stays per build: desktop compares `pencarimovie-server-<target>.tar.gz` tags, the APK
+  compares `apk-server-latest`. AGENTS.md §8b records the rule.
+  Pinned by `routes::tests::update_notice_is_a_non_blocking_item`.
+
+### Changed
+
+- **The dashboard's Addon section is `#addon`** (was `#connect`), and the header nav item
+  says "Addon". `#connect` and the PHP-era `#settings` still resolve through the legacy
+  map, so links already out there keep working.
+- **Stremio's configure gear works, and it opens Catalogs.** It asks for
+  `<transport>/configure`, which for this server is `/<token>/manifest.json/configure`;
+  that answered 404, so the gear was dead in every client. All four spellings now redirect
+  to `/#catalogs`, because configuring this addon means choosing the rows and filters it
+  publishes, while Addon only shows the address. The bare `#configure` link means the same
+  thing now, which also fixes the "Streams Filtered Out" card in the stream list: it links
+  to `#configure` and used to land on Addon, nowhere near the filters it told you to change.
+- **The streams-list update notice is a notification, not a manual.** One line:
+  `PencariMovie v3.0.3 is available (this install is v3.0.2).`, linking to this server's
+  dashboard, which carries the how-to. Deleted along with it: "the streams below still
+  work", the per-host "To update, ..." hint, and the `streams_below` / `had_streams`
+  plumbing that existed only to word those two sentences. The row still never carries a
+  `title` field (stremio-core drops such rows).
+
 ### Fixed
+
+- **`can_apply` is no longer frozen inside the update cache.** `update::check()` memorises
+  the feed answer for an hour, and `can_apply` / `apply_blocked_reason` / `apply_hint` were
+  part of that body, so a freshly extracted release kept answering `no_script` (no "Update
+  now" button) for up to an hour, and a deleted apply script kept offering a button that
+  could not work. They are recomputed on the way out of the cache, exactly like the
+  process-specific fields in `routes::check_version`. Measured both ways on one process:
+  script present → `can_apply:true`, script removed → `can_apply:false`.
+
+- **Header pills and the update card meet WCAG AA.** `--pm-text-muted` (#64748b) measures
+  4.16:1 on the page background and 3.49:1 on the card surface, so the version/host pills
+  and the card's close button now use `--pm-text-secondary` (7.4:1 and 6.48:1). The update
+  pill is a real `<button>` carrying `aria-haspopup="dialog"`, `aria-expanded` and
+  `aria-controls`; opening the card moves focus into it, closing returns focus to the pill,
+  and Escape closes it.
 
 - **A series list can no longer adopt another show's EPISODE TITLE as its own
   name.** `/stream/series/pm:post:8798831284.json` ("The Witch 2025") served

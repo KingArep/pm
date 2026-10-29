@@ -243,6 +243,22 @@ class PencariMovieApp {
           };
         }
       }
+      // ── Dashboard shell ────────────────────────────────────────────────
+      // On the server dashboard the media app is not rendered and there is no
+      // #settingsGate / #addonModal to open: navigation is tabs. Everything
+      // above this point must keep running (catalog settings, LAN IP, the
+      // version check, the session check, and the ?token= bot-setup flow);
+      // everything below is media-shell boot and gate deep links, which do
+      // not apply. The ?token= result is forwarded so the Bots tab can show it.
+      if (document.body.dataset.pmShell === "dashboard") {
+        if (tokenAddResult) {
+          window.dispatchEvent(new CustomEvent("pm:token-result", {
+            detail: tokenAddResult
+          }));
+        }
+        this._startTunnelWatchdog();
+        return;
+      }
       const initialHash = window.location.hash;
       const legacyEngine = !!(window.NuvioBootGuard && window.NuvioBootGuard.engineTooOld && window.NuvioBootGuard.engineTooOld());
       window.__pmLegacyEngine = legacyEngine;
@@ -456,7 +472,7 @@ class PencariMovieApp {
         this.showSettingsGate();
       });
     };
-    (_b = this.$("#logoutBtn")) == null ? void 0 : _b.addEventListener("click", afterLogout);
+    (_b = this.$("#logoutBtn")) == null ? void 0 : _b.addEventListener("click", () => this.logoutDashboard());
     (_c = this.$("#settingsDisconnectBtn")) == null ? void 0 : _c.addEventListener("click", afterLogout);
     (_d = this.$("#settingsClose")) == null ? void 0 : _d.addEventListener("click", () => {
       this.closeSettingsGate();
@@ -1422,6 +1438,16 @@ class PencariMovieApp {
       }
     };
     this._updateAddonModalUrls = updateAddonModalUrls;
+    this.refreshTokenField = refreshTokenField;
+    // The dashboard opens Connect as a tab, with no modal to trigger the work
+    // that openAddonModal() used to do. Without this the manifest URLs went
+    // stale after a tunnel toggle.
+    this.refreshConnectState = () => {
+      updateAddonModalUrls();
+      refreshTokenField();
+      this.loadLanIp().finally(() => updateAddonModalUrls());
+      this.loadTunnelStatus().finally(() => updateAddonModalUrls());
+    };
     updateAddonModalUrls();
     refreshTokenField();
     const openAddonModal = () => {
@@ -1978,7 +2004,15 @@ class PencariMovieApp {
         const value = String(input.value || "").trim();
         if (!value) return;
         yield this.copyToClipboard(value, input);
-        flashCopyBtn(copyBtn);
+        // `flashCopyBtn` never existed in this scope — the sibling helper is
+        // `flashCopyBtn2`, defined inside bindGlobalEvents — so every copy here
+        // threw ReferenceError and the boot guard replaced the whole page with
+        // "Nuvio TV could not start". Flash inline instead.
+        const label = copyBtn.textContent;
+        copyBtn.textContent = "Copied";
+        setTimeout(() => {
+          copyBtn.textContent = label;
+        }, 1400);
       }));
     }
     const changePwBtn = this.$("#changePwBtn");
@@ -3038,6 +3072,50 @@ class PencariMovieApp {
       this._cacheClear();
     });
   }
+  /**
+   * End the DASHBOARD session.
+   *
+   * Two credentials say "this browser is in": the HttpOnly `pm_auth` cookie and
+   * the `pm.auth` localStorage copy that `requestJson()` sends as
+   * `X-Auth-Token`. Only the server can expire the cookie, so it goes through
+   * `/api/auth/logout`; the localStorage copy is cleared here. Leaving either
+   * one behind is what made a password change (which rotates the token) look
+   * like "the page opens without asking for the password, but nothing plays".
+   */
+  logoutDashboard() {
+    return __async(this, null, function* () {
+      const btn = this.$("#logoutBtn");
+      if (btn) btn.disabled = true;
+      try {
+        yield fetch("".concat(this.localApiBase, "/api/auth/logout"), {
+          method: "POST",
+          cache: "no-store"
+        });
+      } catch (error) {
+        console.warn("auth logout failed:", error);
+      }
+      this._authToken = "";
+      try {
+        localStorage.removeItem("pm.auth");
+      } catch (e) {}
+      // Loopback and LAN requests pass `is_authenticated()` without a password,
+      // so expiring the cookie alone left this machine's dashboard wide open and
+      // "Log out" looked dead. The flag holds the gate up for this tab until a
+      // password is entered again; a fresh tab asks the server as usual.
+      this._loggedOut = true;
+      try {
+        sessionStorage.setItem("pm.logged_out", "1");
+      } catch (e) {}
+      const addonTokenInput = this.$("#addonTokenInput");
+      if (addonTokenInput) addonTokenInput.value = "";
+      const pwInput = this.$("#authPasswordInput");
+      if (pwInput) pwInput.value = "";
+      const status = this.$("#authStatus");
+      if (status) status.textContent = "";
+      if (btn) btn.disabled = false;
+      this.showAuthGate();
+    });
+  }
   // ══════════════════════════════════════════════════════════════
   //  HELPERS
   // ══════════════════════════════════════════════════════════════
@@ -4089,6 +4167,16 @@ class PencariMovieApp {
    */
   checkAuth() {
     return __async(this, null, function* () {
+      let loggedOut = this._loggedOut === true;
+      if (!loggedOut) {
+        try {
+          loggedOut = sessionStorage.getItem("pm.logged_out") === "1";
+        } catch (e) {}
+      }
+      if (loggedOut) {
+        this.showAuthGate();
+        return false;
+      }
       try {
         const res = yield fetch("".concat(this.localApiBase, "/api/auth/status"), {
           cache: "no-store",
@@ -4104,6 +4192,15 @@ class PencariMovieApp {
           }
           this.hideAuthGate();
           return true;
+        }
+        // The server rejected what we sent, so the cached copy is dead weight:
+        // keeping it would re-send a rejected token on every request and, after
+        // a password change, hide the gate behind a token that no longer exists.
+        if (this._authToken) {
+          this._authToken = "";
+          try {
+            localStorage.removeItem("pm.auth");
+          } catch (e) {}
         }
         this.showAuthGate();
         return false;
@@ -4164,6 +4261,10 @@ class PencariMovieApp {
         if ((data == null ? void 0 : data.ok) && data.token) {
           this._authToken = data.token;
           localStorage.setItem("pm.auth", data.token);
+          this._loggedOut = false;
+          try {
+            sessionStorage.removeItem("pm.logged_out");
+          } catch (e) {}
           this.hideAuthGate();
           (_a = this._updateAddonModalUrls) == null ? void 0 : _a.call(this);
           const addonTokenInput = this.$("#addonTokenInput");
@@ -5732,28 +5833,15 @@ class PencariMovieApp {
             this.sponsor = null;
           }
         }
-        // An APP SHELL (the Android APK) reports `app_shell: true`: the engine's
-        // WordPress `minimum_version` is a minimum for the PHP ENGINE lineage
-        // (2.7.9), which is always "newer" than the APK's own version (1.0.55), and
-        // the app updates itself from its `apk-server-latest` feed (the banner in
-        // MainActivity.checkForAppUpdate). Neither notice may fire here.
-        const appShell = !!(data && data.app_shell === true);
-        if (data && data.update_needed && !appShell) {
-          // A NOTIFICATION, not a wall: the server no longer refuses requests from
-          // an older build, so show what is available in #settings / #addon.
-          // `canApply: false` — this is the WordPress MINIMUM-version notice, not
-          // a GitHub artifact, so the button opens `update_url` instead of asking
-          // the engine to replace itself.
-          this.renderUpdateNotice({
-            current: this._plainVersion(data.client_version) || this._plainVersion(data.current_version),
-            latest: this._plainVersion(data.minimum_version),
-            url: data.update_url,
-            canApply: false
-          });
-          return null;
-        }
-        // Both desktop builds and Android app shells read their update feed
-        // (/api/update/check resolves desktop releases or apk-server-latest).
+        // ONE update source for every build: `checkDesktopUpdate()` asks
+        // `/api/update/check`, which resolves the GitHub release feed on desktop
+        // and `apk-server-latest` for an Android app shell.
+        //
+        // The WordPress `update_needed` branch that used to sit here is deleted on
+        // purpose. It compared against the plugin's PHP-era `min_version` (2.7.9),
+        // so it reported "no update" while GitHub already had v3.0.3 — and because
+        // it `return`ed early it could also SUPPRESS the real notice. See
+        // AGENTS.md §8b: never wire update state to `/api/version`.
         void this.checkDesktopUpdate();
         return null;
       } catch (e) {

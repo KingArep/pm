@@ -71,6 +71,7 @@ jobs:
     outputs:
       tag: ${{ steps.vars.outputs.tag }}
       publish: ${{ steps.vars.outputs.publish }}
+      commit_sha: ${{ steps.vars.outputs.commit_sha }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -95,6 +96,24 @@ jobs:
               echo "::error::Tag '$TAG' must look like v1.2.3"
               exit 1
             fi
+            VERSION="${TAG#v}"
+
+            # Auto-sync Cargo.toml and Cargo.lock to the release version
+            CURRENT_VER="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+            if [ "$CURRENT_VER" != "$VERSION" ]; then
+              echo "Bumping Cargo.toml and Cargo.lock: $CURRENT_VER -> $VERSION"
+              sed -i "0,/^version = .*/s//version = \"$VERSION\"/" Cargo.toml
+              cargo check --offline || cargo check
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add Cargo.toml Cargo.lock
+              git commit -m "chore(release): rust $VERSION [skip ci]"
+              git push origin "HEAD:${GITHUB_REF_NAME:-main}"
+              git tag -f "$TAG"
+              git push -f origin "$TAG"
+            fi
+
+            echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
             echo "publish=true" >> "$GITHUB_OUTPUT"
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
             echo "Creating/updating release $TAG"
@@ -104,6 +123,7 @@ jobs:
             # No tag: the run is Docker-only. Resolve the latest git tag purely
             # so the summary can suggest the next version.
             TAG="$(git tag -l 'v*' --sort=-v:refname | head -n 1)"
+            echo "commit_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
             echo "No tag supplied — Docker-only build (latest git tag: ${TAG:-none})"
@@ -164,6 +184,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.prepare.outputs.commit_sha || github.sha }}
           # `build.rs` stamps `git describe --tags` in as the build version, which
           # needs the tags (a depth-1 clone has none, so it would fall back to a
           # bare sha for every artifact).
@@ -452,6 +473,8 @@ jobs:
             artifact: container-linux-aarch64
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha || github.sha }}
 
       - name: Download the prebuilt musl binary
         uses: actions/download-artifact@v5
@@ -565,7 +588,7 @@ jobs:
           # `:native`, a moving tag nothing rebuilds on push (this workflow is
           # workflow_dispatch-only), so Heroku silently received whatever image
           # happened to be there — the deploy was green and the app was stale.
-          SHA_TAG="sha-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
+          SHA_TAG="sha-$(printf '%s' "${{ needs.prepare.outputs.commit_sha || github.sha }}" | cut -c1-7)"
           TAGS=(-t "$IMAGE:native" -t "$IMAGE:$SHA_TAG")
           if [ "$PUBLISH" = "true" ] && [ -n "${TAG:-}" ]; then
             TAGS+=(-t "$IMAGE:latest" -t "$IMAGE:$TAG" -t "$IMAGE:native-$TAG")
@@ -607,6 +630,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha || github.sha }}
 
       - name: Download every release artifact
         uses: actions/download-artifact@v5
@@ -677,6 +702,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.prepare.outputs.commit_sha || github.sha }}
           fetch-depth: 0
 
       - name: Write the run summary

@@ -1799,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "pencarimovie-server"
-version = "0.1.0"
+version = "3.0.4"
 dependencies = [
  "aes 0.8.4",
  "anyhow",

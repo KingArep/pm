@@ -737,7 +737,6 @@ pub async fn kill_pid(pid: i64) {
 /// pid file was lost). Never a blanket `taskkill /IM cloudflared.exe`, so an
 /// unrelated tunnel on the same machine is left alone.
 pub async fn kill_leftovers() {
-    let state = load_state();
     let pid = read_pid();
     if pid > 1 {
         kill_pid(pid).await;
@@ -745,6 +744,7 @@ pub async fn kill_leftovers() {
 
     #[cfg(windows)]
     {
+        let state = load_state();
         let mut ports: Vec<u16> = Vec::new();
         let from_state = st_i64(&state, "metrics_port");
         if from_state > 0 && from_state <= u16::MAX as i64 {
@@ -1138,13 +1138,26 @@ pub async fn ensure_ca_bundle() -> PathBuf {
 pub async fn ensure_cloudflared() -> (String, String) {
     if let Some(forced) = env("PM_CLOUDFLARED_BIN") {
         let path = PathBuf::from(&forced);
-        if is_usable_bin(&path) {
-            return (path.to_string_lossy().to_string(), String::new());
+        // Android: the same rule as the candidate list below applies to the
+        // override. A static GitHub build cannot resolve DNS here, so it must
+        // never short-circuit `install_android_cloudflared()` just because an
+        // env var pointed at it. (A dynamically linked build also has to survive
+        // its own startup: under an ARM translation layer, cloudflared aborts
+        // with `runtime/cgo: bad stack bounds`, which is why `wait_for_url` now
+        // stops waiting the moment the process is gone instead of reporting a
+        // 90 s timeout.)
+        if !(is_android() && path.is_file() && !file_has_interp(&path)) {
+            if is_usable_bin(&path) {
+                return (path.to_string_lossy().to_string(), String::new());
+            }
+            if path.is_file() {
+                return (path.to_string_lossy().to_string(), String::new());
+            }
         }
-        if path.is_file() {
-            return (path.to_string_lossy().to_string(), String::new());
-        }
-        log("PM_CLOUDFLARED_BIN is not a file", &json!({"path": forced}));
+        log(
+            "ignoring PM_CLOUDFLARED_BIN: no bionic ELF on Android",
+            &json!({"path": forced}),
+        );
     }
 
     let mut candidates: Vec<PathBuf> = vec![
@@ -1474,7 +1487,23 @@ pub async fn wait_for_url(timeout_secs: u64, metrics_port: u16, pid: i64) -> Str
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut from_logs = String::new();
     let mut log_seen: Option<Instant> = None;
+    // A connector that died at birth can never publish a URL, so waiting the full
+    // timeout only hides the reason behind a 90 s spinner. Checked once a second;
+    // the first check is skipped so a fast exit right after spawn is still seen as
+    // "not alive yet" rather than a verdict.
+    let mut alive_check = Instant::now();
     while Instant::now() < deadline {
+        if alive_check.elapsed() >= Duration::from_secs(1) {
+            alive_check = Instant::now();
+            if !pid_alive(pid, 0).await {
+                // Second look after a beat: a connector that is merely slow to
+                // exec must not be reported as dead.
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                if !pid_alive(pid, 0).await {
+                    return String::new();
+                }
+            }
+        }
         let live = read_quicktunnel_url(pid, metrics_port).await;
         if !live.is_empty() {
             return live;
