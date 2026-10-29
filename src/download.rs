@@ -161,6 +161,35 @@ fn prime_window(start: u64, aligned: u64, total: u64, file_size: u64) -> (u64, u
     (skip0, want)
 }
 
+/// Fetch the preflight range in parallel when it spans more than one Telegram
+/// part. A seek usually needs the bytes before the requested offset plus the
+/// first playable bytes, so the 1 MB aligned prime is commonly two 512 KB
+/// requests. Fetching those serially delays the HTTP response and makes players
+/// report a stall while the seek is still being primed.
+async fn fetch_prime_gated(
+    client: &grammers_client::Client,
+    gate: &tokio::sync::Semaphore,
+    target: &DocTarget,
+    pos: u64,
+    want: u64,
+) -> Result<Vec<u8>, crate::telegram::GramErr> {
+    if want <= crate::telegram::MAX_CHUNK {
+        return crate::telegram::fetch_range_gated(client, gate, target, pos, want).await;
+    }
+
+    // The prime is capped at 1 MB, so it is at most two legal 512 KB Telegram
+    // parts. The second offset remains part-aligned.
+    let first_want = crate::telegram::MAX_CHUNK;
+    let second_pos = pos.saturating_add(first_want);
+    let second_want = want - first_want;
+    let (mut first, second) = tokio::try_join!(
+        crate::telegram::fetch_range_gated(client, gate, target, pos, first_want),
+        crate::telegram::fetch_range_gated(client, gate, target, second_pos, second_want),
+    )?;
+    first.extend_from_slice(&second);
+    Ok(first)
+}
+
 /// One fetch window, clamped so it never asks past the last byte. A window that
 /// over-runs EOF makes Telegram error and the body dies short of the
 /// `Content-Length` already sent.
@@ -1320,9 +1349,7 @@ pub async fn handle_download(state: &Arc<AppState>, ctx: &ReqCtx) -> Response {
             );
             break;
         }
-        match crate::telegram::fetch_range_gated(&client, client_gate.as_ref(), &target, aligned, prime_want)
-            .await
-        {
+        match fetch_prime_gated(&client, client_gate.as_ref(), &target, aligned, prime_want).await {
             Ok(buf) => {
                 first = Some(buf);
                 break;
